@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import sys
+import webbrowser
 
 from asn1crypto import pem
 from asn1crypto import x509 as asn1x509
@@ -41,6 +42,12 @@ CARPETAS_CA = [
 ]
 
 OK, MAL = "OK   ", "FALLA"
+
+# Validador oficial argentino: acepta certificados paraguayos por el Acuerdo de
+# Reconocimiento Mutuo del Mercosur. Se ofrece este y no el Validador PY del MIC
+# porque la pagina desde la que se accede a aquel devuelve 404 (2026-09-18).
+VALIDADOR_OFICIAL = "https://validadordefirmas.gob.ar"
+NOTA_LEGAL = ("Esto no reemplaza al validador oficial: no dictamina validez legal.")
 
 
 def cargar_certificados(rutas):
@@ -129,6 +136,7 @@ def render_texto(pdf, resumenes, n_cas):
     todo = all(r["ok"] for r in resumenes)
     print("\n" + ("Todas las firmas son validas y confiables."
                   if todo else "Hay firmas con problemas (ver arriba)."))
+    print(f"\n{NOTA_LEGAL}\nValidador oficial: {VALIDADOR_OFICIAL}")
 
 
 def render_gui(pdf, resumenes, n_cas):
@@ -174,10 +182,20 @@ def render_gui(pdf, resumenes, n_cas):
 
     pie = tk.Frame(win, padx=16, pady=10)
     pie.pack(fill="x")
-    tk.Label(pie, fg="#666", justify="left", anchor="w", text=(
-        f"{n_cas} certificado(s) de CA cargados.\n"
-        "Esto no reemplaza al validador oficial: no dictamina validez legal."
-    )).pack(side="left")
+    texto = tk.Frame(pie)
+    texto.pack(side="left", anchor="w")
+    tk.Label(texto, fg="#666", anchor="w",
+             text=f"{n_cas} certificado(s) de CA cargados.").pack(anchor="w")
+    tk.Label(texto, fg="#666", anchor="w", text=NOTA_LEGAL).pack(anchor="w")
+
+    enlace = tk.Frame(texto)
+    enlace.pack(anchor="w")
+    tk.Label(enlace, fg="#666", text="Validador oficial:").pack(side="left")
+    url = tk.Label(enlace, fg="#0a58ca", cursor="hand2", text=VALIDADOR_OFICIAL,
+                   font=("TkDefaultFont", 9, "underline"))
+    url.pack(side="left", padx=(4, 0))
+    url.bind("<Button-1>", lambda e: webbrowser.open(VALIDADOR_OFICIAL))
+
     tk.Button(pie, text="Cerrar", command=win.destroy).pack(side="right")
 
     win.bind("<Escape>", lambda e: win.destroy())
