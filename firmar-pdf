@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Firma un PDF con el token Bit4id replicando lo que hace Adobe Acrobat.
+
+Por defecto abre una ventana para elegir con el mouse donde va el sello visible.
+  firmar-pdf entrada.pdf salida.pdf                    -> selector visual
+  firmar-pdf entrada.pdf salida.pdf --caja 1:340,70,560,140  -> sin ventana (lotes)
+  firmar-pdf entrada.pdf salida.pdf --invisible        -> sin sello ni ventana
+
+Parametros verificados contra un PDF firmado en la HP con Acrobat (2026-09-18):
+  - SubFilter  adbe.pkcs7.detached   (NO PAdES/ETSI)
+  - Digest     SHA-256
+  - Sin sello de tiempo (no usan TSA)
+  - "Bloquear documento tras la firma" = FieldMDP /Action /All + /P 1
+    (es firma de APROBACION con bloqueo de campos, NO una certificacion DocMDP)
+"""
+import argparse
+import configparser
+import getpass
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+from pyhanko.pdf_utils import text as pdftext
+from pyhanko.pdf_utils.font.basic import SimpleFontEngineFactory
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+from pyhanko.sign import fields, signers
+from pyhanko.sign.pkcs11 import PKCS11Signer, TokenCriteria, open_pkcs11_session
+from pyhanko.sign.signers.pdf_signer import PdfSigner
+from pyhanko.stamp import TextStampStyle
+
+# --- Configuracion -----------------------------------------------------------
+# Nada de esto es obligatorio: si no se configura, el modulo PKCS#11 se busca
+# entre las rutas conocidas y los objetos del token se detectan solos (pyHanko
+# consulta por clase y, si hay un unico certificado/clave, lo toma). Un token
+# personal de firma tiene exactamente uno, asi que el caso normal no necesita
+# configurar nada.
+#
+# Orden de precedencia: flags de linea de comandos > variables de entorno >
+# ~/.config/firma-digital/config.ini > autodeteccion.
+
+RUTAS_PKCS11 = [
+    "/usr/lib/bit4id/libbit4xpki.so",              # middleware Bit4id
+    "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",  # OpenSC (generico)
+    "/usr/lib/opensc-pkcs11.so",
+    "/usr/local/lib/libbit4xpki.so",
+]
+
+CONFIG = pathlib.Path(
+    os.environ.get("XDG_CONFIG_HOME", "~/.config")
+).expanduser() / "firma-digital" / "config.ini"
+
+
+def _config_archivo():
+    if not CONFIG.is_file():
+        return {}
+    cp = configparser.ConfigParser()
+    cp.read(CONFIG)
+    return dict(cp["token"]) if cp.has_section("token") else {}
+
+
+def resolver_token(args):
+    """Devuelve (lib, token_label, cert_label, key_label). None = autodetectar."""
+    arch = _config_archivo()
+
+    def opt(nombre, valor_cli):
+        if valor_cli:
+            return valor_cli
+        env = os.environ.get("FIRMA_" + nombre.upper())
+        if env:
+            return env
+        return arch.get(nombre) or None
+
+    lib = opt("lib", args.lib)
+    if lib is None:
+        lib = next((r for r in RUTAS_PKCS11 if os.path.exists(r)), None)
+        if lib is None:
+            raise SystemExit(
+                "No se encontro ningun modulo PKCS#11. Instala el middleware de "
+                "tu token e indicalo con --lib, la variable FIRMA_LIB, o "
+                f"la clave 'lib' en {CONFIG}"
+            )
+    return lib, opt("token_label", args.token_label), \
+        opt("cert_label", args.cert_label), opt("key_label", args.key_label)
+
+# Mismo texto que muestra Acrobat, en castellano.
+TEXTO_SELLO = "Firmado digitalmente por\n%(signer)s\nFecha: %(ts)s"
+FORMATO_FECHA = "%Y.%m.%d %H:%M:%S %z"
+# Helvetica es una de las 14 fuentes estandar de PDF: se referencia sin incrustar.
+# pyHanko solo trae metricas de Courier (COURIER_META); sin meta el ancho es
+# aproximado, lo que solo afecta el calculo de encaje en la caja.
+FUENTE = SimpleFontEngineFactory("Helvetica", 0.5)
+
+ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
+
+
+def parse_caja(valor):
+    """'PAGINA:X1,Y1,X2,Y2' o 'X1,Y1,X2,Y2' (pagina 1). Puntos PDF, origen
+    abajo-izquierda de la pagina."""
+    pagina = 1
+    if ":" in valor:
+        pagina_txt, valor = valor.split(":", 1)
+        pagina = int(pagina_txt)
+    partes = [int(v) for v in valor.split(",")]
+    if len(partes) != 4:
+        raise argparse.ArgumentTypeError(
+            "la caja va como PAGINA:X1,Y1,X2,Y2 (ej. 1:340,70,560,140)"
+        )
+    if pagina < 1:
+        raise argparse.ArgumentTypeError("la pagina se numera desde 1")
+    return pagina, tuple(partes)
+
+
+def elegir_caja(pdf, pagina=1):
+    """Ventana con la pagina renderizada; devuelve (pagina, caja) o None.
+
+    El rectangulo se arrastra con el mouse, igual que en Acrobat. Las
+    coordenadas salen en puntos PDF con origen abajo-izquierda, que es lo que
+    espera SigFieldSpec.
+    """
+    import tkinter as tk
+    from pyhanko.pdf_utils.reader import PdfFileReader
+
+    with open(pdf, "rb") as fh:
+        total = PdfFileReader(fh).root["/Pages"]["/Count"]
+
+    tmp = tempfile.mkdtemp(prefix="firmar-pdf-")
+    estado = {"pagina": max(1, min(pagina, total)), "caja": None, "ok": False,
+              "zoom": None}
+
+    root = tk.Tk()
+    root.title(f"Elegir area de la firma — {pathlib.Path(pdf).name}")
+    pant_w = root.winfo_screenwidth()
+    pant_h = root.winfo_screenheight()
+    max_w, max_h = pant_w - 120, pant_h - 220
+
+    barra = tk.Frame(root)
+    barra.pack(fill="x", padx=6, pady=4)
+    etiqueta = tk.Label(barra, text="", anchor="w")
+
+    marco = tk.Frame(root)
+    marco.pack(fill="both", expand=True)
+    vbar = tk.Scrollbar(marco, orient="vertical")
+    hbar = tk.Scrollbar(marco, orient="horizontal")
+    lienzo = tk.Canvas(marco, cursor="crosshair", highlightthickness=0,
+                       background="#888",
+                       yscrollcommand=vbar.set, xscrollcommand=hbar.set)
+    vbar.config(command=lienzo.yview)
+    hbar.config(command=lienzo.xview)
+    vbar.pack(side="right", fill="y")
+    hbar.pack(side="bottom", fill="x")
+    lienzo.pack(side="left", fill="both", expand=True)
+
+    vista = {"img": None, "dpi": 72.0, "alto_px": 0, "rect": None,
+             "pt": (595.0, 842.0)}
+
+    def medir_pagina(n):
+        """Renderiza a 72 dpi: 1 px == 1 pt, asi sale el tamano en puntos."""
+        sonda = f"{tmp}/sonda.png"
+        subprocess.run(["mutool", "draw", "-r", "72", "-o", sonda, pdf, str(n)],
+                       check=True, capture_output=True)
+        img = tk.PhotoImage(file=sonda)
+        return float(img.width()), float(img.height())
+
+    def render():
+        n = estado["pagina"]
+        ancho_pt, alto_pt = medir_pagina(n)
+        vista["pt"] = (ancho_pt, alto_pt)
+        if estado["zoom"] is None:
+            # encajar la pagina entera en pantalla, sin ampliar de mas
+            estado["zoom"] = min(max_w / ancho_pt, max_h / alto_pt, 2.0)
+        dpi = 72.0 * estado["zoom"]
+        png = f"{tmp}/p{n}_{dpi:.0f}.png"
+        subprocess.run(["mutool", "draw", "-r", f"{dpi:.2f}", "-o", png, pdf, str(n)],
+                       check=True, capture_output=True)
+        img = tk.PhotoImage(file=png)
+        vista.update(img=img, dpi=dpi, alto_px=img.height())
+        lienzo.delete("all")
+        lienzo.create_image(0, 0, anchor="nw", image=img)
+        lienzo.config(scrollregion=(0, 0, img.width(), img.height()))
+        lienzo.config(width=min(img.width(), max_w), height=min(img.height(), max_h))
+        vista["rect"] = None
+        estado["caja"] = None
+        actualizar()
+
+    def a_puntos(x_px, y_px):
+        f = 72.0 / vista["dpi"]
+        return x_px * f, (vista["alto_px"] - y_px) * f
+
+    def actualizar():
+        c = estado["caja"]
+        base = f"Pagina {estado['pagina']}/{total}  ·  {estado['zoom']*100:.0f}%"
+        if c is None:
+            txt = f"{base}  ·  arrastra el area de la firma"
+        else:
+            txt = f"{base}  ·  --caja {estado['pagina']}:{c[0]},{c[1]},{c[2]},{c[3]}"
+        etiqueta.config(text=txt)
+        boton_ok.config(state="normal" if c else "disabled")
+
+    inicio = {}
+
+    def press(e):
+        inicio["x"], inicio["y"] = lienzo.canvasx(e.x), lienzo.canvasy(e.y)
+        if vista["rect"]:
+            lienzo.delete(vista["rect"])
+        vista["rect"] = lienzo.create_rectangle(
+            inicio["x"], inicio["y"], inicio["x"], inicio["y"],
+            outline="#0a7", width=2, dash=(4, 3))
+
+    def drag(e):
+        if not vista["rect"]:
+            return
+        lienzo.coords(vista["rect"], inicio["x"], inicio["y"],
+                      lienzo.canvasx(e.x), lienzo.canvasy(e.y))
+
+    def release(e):
+        if not vista["rect"]:
+            return
+        x0, y0, x1, y1 = lienzo.coords(vista["rect"])
+        if abs(x1 - x0) < 8 or abs(y1 - y0) < 8:
+            lienzo.delete(vista["rect"])
+            vista["rect"] = None
+            estado["caja"] = None
+        else:
+            ax, ay = a_puntos(min(x0, x1), max(y0, y1))
+            bx, by = a_puntos(max(x0, x1), min(y0, y1))
+            estado["caja"] = (round(ax), round(ay), round(bx), round(by))
+        actualizar()
+
+    def scroll_v(e):
+        # Boton 4/5 en X11, delta en otros toolkits
+        if getattr(e, "num", None) == 4 or getattr(e, "delta", 0) > 0:
+            lienzo.yview_scroll(-3, "units")
+        elif getattr(e, "num", None) == 5 or getattr(e, "delta", 0) < 0:
+            lienzo.yview_scroll(3, "units")
+
+    def scroll_h(e):
+        if getattr(e, "num", None) == 4 or getattr(e, "delta", 0) > 0:
+            lienzo.xview_scroll(-3, "units")
+        else:
+            lienzo.xview_scroll(3, "units")
+
+    def zoom(factor):
+        estado["zoom"] = max(ZOOM_MIN, min(ZOOM_MAX, estado["zoom"] * factor))
+        render()
+
+    def zoom_ajustar():
+        ancho_pt, alto_pt = vista["pt"]
+        estado["zoom"] = min(max_w / ancho_pt, max_h / alto_pt, 2.0)
+        render()
+
+    lienzo.bind("<ButtonPress-1>", press)
+    lienzo.bind("<B1-Motion>", drag)
+    lienzo.bind("<ButtonRelease-1>", release)
+    for ev in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+        root.bind_all(ev, scroll_v)
+    for ev in ("<Shift-Button-4>", "<Shift-Button-5>", "<Shift-MouseWheel>"):
+        root.bind_all(ev, scroll_h)
+
+    def confirmar():
+        estado["ok"] = True
+        root.destroy()
+
+    def pagina_delta(d):
+        nueva = estado["pagina"] + d
+        if 1 <= nueva <= total:
+            estado["pagina"] = nueva
+            render()
+
+    tk.Button(barra, text="<", width=3, command=lambda: pagina_delta(-1)).pack(side="left")
+    tk.Button(barra, text=">", width=3, command=lambda: pagina_delta(1)).pack(side="left")
+    tk.Button(barra, text="−", width=3, command=lambda: zoom(1 / 1.25)).pack(side="left", padx=(8, 0))
+    tk.Button(barra, text="+", width=3, command=lambda: zoom(1.25)).pack(side="left")
+    tk.Button(barra, text="Ajustar", command=zoom_ajustar).pack(side="left", padx=4)
+    boton_ok = tk.Button(barra, text="Firmar aqui", command=confirmar, state="disabled")
+    boton_ok.pack(side="right")
+    tk.Button(barra, text="Cancelar", command=root.destroy).pack(side="right", padx=4)
+    etiqueta.pack(side="left", padx=10)
+
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.bind("<Return>", lambda e: confirmar() if estado["caja"] else None)
+    root.bind("<Prior>", lambda e: pagina_delta(-1))
+    root.bind("<Next>", lambda e: pagina_delta(1))
+
+    render()
+    root.update_idletasks()
+    root.geometry(f"+{max(0, (pant_w - root.winfo_width()) // 2)}+40")
+    root.mainloop()
+    return (estado["pagina"], estado["caja"]) if estado["ok"] else None
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("entrada")
+    p.add_argument("salida")
+    p.add_argument("--caja", type=parse_caja, default=None, metavar="P:X1,Y1,X2,Y2",
+                   help="posicion del sello en puntos PDF (origen abajo-izquierda); "
+                        "salteando el selector visual. Para lotes")
+    p.add_argument("--invisible", action="store_true",
+                   help="firmar sin sello visible y sin abrir el selector")
+    p.add_argument("--pagina", type=int, default=1,
+                   help="pagina en la que abre el selector (default: 1)")
+    p.add_argument("--campo", default="Firma1", help="nombre del campo de firma")
+    p.add_argument("--sin-bloqueo", action="store_true",
+                   help="no bloquear los campos tras firmar")
+    p.add_argument("--tamano-fuente", type=int, default=8)
+    p.add_argument("--motivo", default=None)
+    p.add_argument("--lugar", default=None)
+    g = p.add_argument_group("token (opcional: por defecto se autodetecta)")
+    g.add_argument("--lib", default=None, metavar="RUTA",
+                   help="modulo PKCS#11 del middleware")
+    g.add_argument("--token-label", default=None)
+    g.add_argument("--cert-label", default=None)
+    g.add_argument("--key-label", default=None)
+    a = p.parse_args()
+
+    if a.invisible and a.caja is not None:
+        p.error("--invisible y --caja son excluyentes")
+
+    if not a.invisible and a.caja is None:
+        elegida = elegir_caja(a.entrada, a.pagina)
+        if elegida is None:
+            print("Cancelado, no se firmo nada.", file=sys.stderr)
+            return 1
+        a.caja = elegida
+        print(f"Area elegida: --caja {a.caja[0]}:" + ",".join(map(str, a.caja[1])))
+
+    lib, token_label, cert_label, key_label = resolver_token(a)
+
+    pin = getpass.getpass("PIN del token: ")
+    criterio = TokenCriteria(label=token_label) if token_label else None
+    session = open_pkcs11_session(lib, token_criteria=criterio, user_pin=pin)
+    try:
+        # cert_label/key_label en None => pyHanko consulta solo por clase y toma
+        # el unico objeto que haya (ver docs/diagnostico.md)
+        signer = PKCS11Signer(session, cert_label=cert_label, key_label=key_label)
+
+        spec_extra = {}
+        meta_extra = {}
+        if not a.sin_bloqueo:
+            spec_extra.update(
+                field_mdp_spec=fields.FieldMDPSpec(fields.FieldMDPAction.ALL),
+                doc_mdp_update_value=fields.MDPPerm.NO_CHANGES,
+            )
+            # explicito: sin esto pyHanko pide FILL_FORMS por defecto, choca con
+            # el spec del campo y emite una advertencia confusa
+            meta_extra["docmdp_permissions"] = fields.MDPPerm.NO_CHANGES
+
+        estilo = None
+        text_params = None
+        if a.caja is not None:
+            pagina, box = a.caja
+            spec_extra.update(on_page=pagina - 1, box=box)
+            estilo = TextStampStyle(
+                stamp_text=TEXTO_SELLO,
+                timestamp_format=FORMATO_FECHA,
+                text_box_style=pdftext.TextBoxStyle(
+                    font=FUENTE, font_size=a.tamano_fuente
+                ),
+                border_width=0,   # Acrobat no dibuja recuadro
+                background=None,
+            )
+            nombre = signer.signing_cert.subject.native.get("common_name", "")
+            text_params = {"signer": nombre}
+
+        with open(a.entrada, "rb") as fh:
+            w = IncrementalPdfFileWriter(fh)
+            fields.append_signature_field(
+                w, fields.SigFieldSpec(sig_field_name=a.campo, **spec_extra)
+            )
+            meta = signers.PdfSignatureMetadata(
+                field_name=a.campo, md_algorithm="sha256",
+                reason=a.motivo, location=a.lugar, **meta_extra,
+            )
+            pdf_signer = PdfSigner(meta, signer=signer, stamp_style=estilo)
+            with open(a.salida, "wb") as out:
+                pdf_signer.sign_pdf(
+                    w, existing_fields_only=True,
+                    appearance_text_params=text_params, output=out,
+                )
+    finally:
+        session.close()
+
+    detalles = [] if a.sin_bloqueo else ["campos bloqueados"]
+    detalles.append("invisible" if a.caja is None else f"sello en pagina {a.caja[0]}")
+    print(f"Firmado: {a.salida} ({', '.join(detalles)})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
