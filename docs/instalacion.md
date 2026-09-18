@@ -73,10 +73,20 @@ Tres detalles que hacen perder tiempo:
 - `python3-tk` es para el selector visual y `mupdf-tools` aporta `mutool`, que
   renderiza las páginas. Sin ellos, `--caja` o `--invisible` igual funcionan.
 
-## 4. Instalar el firmador
+## 4. Instalar el firmador y el validador
 
 ```bash
-sudo install -m755 firmar-pdf /usr/local/bin/firmar-pdf
+sudo install -m755 firmar-pdf validar-pdf /usr/local/bin/
+
+# certificados de las CA, para que validar-pdf pueda verificar la cadena
+mkdir -p ~/.config/firma-digital/ca
+cp certificados/*.pem ~/.config/firma-digital/ca/
+```
+
+Alternativa para todo el sistema, en vez de por usuario:
+
+```bash
+sudo install -Dm644 certificados/*.pem -t /usr/local/share/firma-digital/certificados/
 ```
 
 Si lo instalás en `~/.local/bin`, asegurate de que esté en el `PATH`.
@@ -96,5 +106,5 @@ sed -i "1s|.*|#!$(pipx environment --value PIPX_LOCAL_VENVS)/pyhanko-cli/bin/pyt
 firmar-pdf --help
 echo "prueba" > /tmp/t.txt && libreoffice --headless --convert-to pdf --outdir /tmp /tmp/t.txt
 firmar-pdf /tmp/t.pdf /tmp/t-firmado.pdf
-pdfsig /tmp/t-firmado.pdf          # debe decir "Signature is Valid"
+validar-pdf /tmp/t-firmado.pdf     # las cuatro comprobaciones en OK
 ```

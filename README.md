@@ -41,8 +41,8 @@ sudo apt install pipx python3-tk mupdf-tools
 pipx install 'pyhanko-cli[pkcs11]'
 pipx inject pyhanko-cli 'pyhanko[pkcs11]'
 
-# el firmador
-sudo install -m755 firmar-pdf /usr/local/bin/firmar-pdf
+# el firmador y el validador
+sudo install -m755 firmar-pdf validar-pdf /usr/local/bin/
 ```
 
 ## Uso
@@ -116,6 +116,41 @@ o las variables `FIRMA_LIB`, `FIRMA_TOKEN_LABEL`, `FIRMA_CERT_LABEL`,
 ```bash
 pkcs11-tool --module /ruta/al/modulo.so -O -l
 ```
+
+## Validar un PDF firmado
+
+```bash
+validar-pdf documento_firmado.pdf
+```
+
+```
+Firma 1 de 1
+------------
+  Firmante   : NOMBRE DEL FIRMANTE
+  Emisor     : SOS TECNOLOGIA Y GESTION DE INFORMACION LTDA
+  Fecha      : 2026-09-18 15:02:16 -0300
+
+  [OK   ] Integridad    el documento no fue alterado tras firmar
+  [OK   ] Cobertura     la firma abarca todo el archivo
+  [OK   ] Confianza     el certificado encadena a una raiz confiable
+  [OK   ] Bloqueo       no hubo cambios prohibidos por el bloqueo
+```
+
+Devuelve 0 si todas las firmas están bien y 1 si alguna falla, así que sirve en
+scripts. Los certificados de las CA salen de `certificados/` (viene con la raíz
+del Paraguay y la intermedia de SOS), de `~/.config/firma-digital/ca/` y de los
+que pases con `--ca`. Ver [certificados/README.md](certificados/README.md) para
+agregar otro prestador.
+
+Por defecto la revocación se comprueba en modo tolerante, sin red. `--revocacion`
+la exige en línea (OCSP/CRL).
+
+**Esto no reemplaza al validador oficial**: no dictamina sobre la validez legal.
+El oficial paraguayo es el *Validador PY* del MIC, al que se llega desde
+`acraiz.gov.py` → *Lista de confianza* → *Validador Nacional* (al 2026-09-18 esa
+página devuelve 404). Por el Acuerdo de Reconocimiento Mutuo del Mercosur también
+sirve el argentino, que acepta certificados paraguayos:
+**https://validadordefirmas.gob.ar**
 
 ## Formato de la firma
 

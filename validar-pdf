@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Valida las firmas digitales de un PDF contra la cadena de confianza paraguaya.
+
+    validar-pdf documento_firmado.pdf
+
+Informa, por cada firma: quien firmo, cuando, si el documento esta intacto, si la
+firma cubre todo el archivo, y si el certificado encadena a una raiz de confianza.
+
+Los certificados de las CA salen de la carpeta `certificados/` del repo, de
+~/.config/firma-digital/ca/ y de los que se pasen con --ca.
+
+Esto NO reemplaza al validador oficial: no dictamina sobre la validez legal de la
+firma. Sirve para detectar problemas antes de presentar un documento. El validador
+oficial paraguayo es el "Validador PY" del MIC; por el reconocimiento mutuo del
+Mercosur tambien sirve el argentino: https://validadordefirmas.gob.ar
+"""
+import argparse
+import logging
+import pathlib
+import sys
+
+from asn1crypto import pem
+from asn1crypto import x509 as asn1x509
+from pyhanko.pdf_utils.reader import PdfFileReader
+from pyhanko.sign.validation import validate_pdf_signature
+from pyhanko.sign.validation.status import SignatureCoverageLevel
+from pyhanko_certvalidator import ValidationContext
+
+AQUI = pathlib.Path(__file__).resolve().parent
+
+# Donde se buscan los certificados de las CA, en orden. Cubre tanto correr el
+# script desde el repo como tenerlo instalado en /usr/local/bin.
+CARPETAS_CA = [
+    pathlib.Path("~/.config/firma-digital/ca").expanduser(),
+    AQUI / "certificados",
+    AQUI.parent / "share" / "firma-digital" / "certificados",
+    pathlib.Path("/usr/local/share/firma-digital/certificados"),
+    pathlib.Path("/usr/share/firma-digital/certificados"),
+]
+
+OK, MAL = "OK   ", "FALLA"
+
+
+def cargar_certificados(rutas):
+    """Lee certificados PEM o DER de las rutas y carpetas indicadas."""
+    archivos = []
+    for r in rutas:
+        r = pathlib.Path(r)
+        if r.is_dir():
+            archivos += sorted(p for p in r.iterdir()
+                               if p.suffix.lower() in (".pem", ".crt", ".cer", ".der"))
+        elif r.is_file():
+            archivos.append(r)
+    certs = []
+    for a in archivos:
+        datos = a.read_bytes()
+        try:
+            if pem.detect(datos):
+                for _, _, der in pem.unarmor(datos, multiple=True):
+                    certs.append(asn1x509.Certificate.load(der))
+            else:
+                certs.append(asn1x509.Certificate.load(datos))
+        except Exception as e:
+            print(f"aviso: no se pudo leer {a}: {e}", file=sys.stderr)
+    return certs
+
+
+def nombre_comun(cert):
+    try:
+        return cert.subject.native.get("common_name", "(sin CN)")
+    except Exception:
+        return "(ilegible)"
+
+
+def informar(i, st, total):
+    cabecera = f"Firma {i} de {total}"
+    print(f"\n{cabecera}\n{'-' * len(cabecera)}")
+    print(f"  Firmante   : {nombre_comun(st.signing_cert)}")
+    emisor = st.signing_cert.issuer.native.get("common_name", "?")
+    print(f"  Emisor     : {emisor}")
+    if st.signer_reported_dt:
+        # la firma guarda la hora en UTC; se muestra en la zona local
+        local = st.signer_reported_dt.astimezone()
+        print(f"  Fecha      : {local:%Y-%m-%d %H:%M:%S %z}")
+
+    cubre_todo = st.coverage == SignatureCoverageLevel.ENTIRE_FILE
+    filas = [
+        ("Integridad  ", st.intact, "el documento no fue alterado tras firmar"),
+        ("Cobertura   ", cubre_todo, "la firma abarca todo el archivo"),
+        ("Confianza   ", st.trusted, "el certificado encadena a una raiz confiable"),
+    ]
+    if st.docmdp_ok is not None:
+        filas.append(("Bloqueo     ", st.docmdp_ok,
+                      "no hubo cambios prohibidos por el bloqueo"))
+    print()
+    for etiqueta, valor, detalle in filas:
+        marca = OK if valor else MAL
+        print(f"  [{marca}] {etiqueta}  {detalle}")
+    return st.intact and cubre_todo and st.trusted and (st.docmdp_ok is not False)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("pdf")
+    p.add_argument("--ca", action="append", default=[], metavar="RUTA",
+                   help="certificado o carpeta de certificados extra (repetible)")
+    p.add_argument("--sin-ca-propias", action="store_true",
+                   help="no cargar los certificados del repo ni de ~/.config")
+    p.add_argument("--verboso", action="store_true",
+                   help="mostrar los mensajes internos de pyHanko")
+    p.add_argument("--revocacion", action="store_true",
+                   help="exigir comprobacion de revocacion en linea (OCSP/CRL); "
+                        "por defecto se hace en modo tolerante")
+    a = p.parse_args()
+
+    if not a.verboso:
+        # pyHanko registra la excepcion de cadena no encontrada con su traza
+        # completa; el informe de abajo ya dice lo que hace falta saber
+        logging.getLogger("pyhanko").setLevel(logging.CRITICAL)
+
+    rutas = list(a.ca)
+    if not a.sin_ca_propias:
+        rutas += CARPETAS_CA
+    raices = cargar_certificados(rutas)
+    if not raices:
+        print("aviso: no se encontro ningun certificado de CA, asi que la "
+              "confianza va a dar FALLA.\n       Copia los certificados a "
+              f"{CARPETAS_CA[0]} o pasalos con --ca.", file=sys.stderr)
+
+    contexto = ValidationContext(
+        trust_roots=raices,
+        revocation_mode="require" if a.revocacion else "soft-fail",
+        allow_fetching=a.revocacion,
+    )
+
+    with open(a.pdf, "rb") as fh:
+        lector = PdfFileReader(fh)
+        firmas = lector.embedded_signatures
+        if not firmas:
+            print("El documento no tiene firmas digitales.")
+            return 1
+        print(f"{a.pdf}: {len(firmas)} firma(s), "
+              f"{len(raices)} certificado(s) de CA cargados")
+        todo_bien = True
+        for i, firma in enumerate(firmas, 1):
+            st = validate_pdf_signature(firma, signer_validation_context=contexto)
+            todo_bien &= informar(i, st, len(firmas))
+
+    print("\n" + ("Todas las firmas son validas y confiables."
+                  if todo_bien else "Hay firmas con problemas (ver arriba)."))
+    return 0 if todo_bien else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

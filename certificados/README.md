@@ -1,0 +1,41 @@
+# Certificados de la ICPP (Paraguay)
+
+Cadena de confianza para validar firmas emitidas bajo la Infraestructura de Clave
+Pública del Paraguay. Son certificados **públicos**: se incluyen acá solo para que
+`validar-pdf` funcione sin configuración previa.
+
+| Archivo | Titular | Vence |
+|---|---|---|
+| `ac_raiz_paraguay.pem` | Autoridad Certificadora Raíz del Paraguay (MIC) | 2032-08-07 |
+| `sos_tecnologia.pem` | SOS TECNOLOGIA Y GESTION DE INFORMACION LTDA | 2032-05-26 |
+
+## De dónde salen
+
+```
+https://www.acraiz.gov.py/adjunt/ac_raiz_py_sha256.crt
+https://www.acraiz.gov.py/adjunt/Certificados/SOS%20DOCS.crt
+```
+
+La lista completa de prestadores cualificados está en
+`https://www.acraiz.gov.py/html/Certif_1PrestaServ.html`, con un enlace al
+certificado de cada uno. La versión legible por máquina es la TSL:
+`https://www.acraiz.gov.py/tsl/tsl_Py.xml`.
+
+> El menú del sitio tiene la pestaña *Lista de confianza* rota (404 al 2026-09-18),
+> pero los archivos son alcanzables por URL directa.
+
+## Agregar el certificado de otro prestador
+
+Bajá el `.crt` (viene en DER), convertilo y dejalo en esta carpeta:
+
+```bash
+openssl x509 -inform der -in "OTRO.crt" -out certificados/otro.pem
+```
+
+`validar-pdf` toma todos los `.pem` de acá, más los de
+`~/.config/firma-digital/ca/`, más los que le pases con `--ca`.
+
+## Refrescar
+
+Estos certificados se renuevan cada varios años. Si aparece un error de cadena con
+un certificado nuevo, volvé a bajarlos de las URL de arriba.
