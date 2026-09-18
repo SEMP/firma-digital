@@ -190,9 +190,14 @@ cualificado de la **ICPP** (Infraestructura de Clave Pública Paraguaya), en
 Ubuntu 24.04. Debería andar con cualquier token PKCS#11; si lo probás con otro,
 avisá cómo te fue.
 
-**No verificado:** que los validadores oficiales acepten los PDF firmados con
-esta herramienta. Los parámetros son idénticos a los de Acrobat, pero conviene
-que valides un documento de prueba antes de usarla para algo con consecuencias.
+**Verificado el 2026-09-18:** un PDF firmado con esta herramienta pasa el
+validador oficial **argentino** ([validadordefirmas.gob.ar](https://validadordefirmas.gob.ar)),
+que reconoce certificados paraguayos por el Acuerdo de Reconocimiento Mutuo del
+Mercosur. Resultado: *"Documento Válido — No hubo problemas en las firmas"*, con
+la firma marcada como **Válida**.
+
+No se pudo probar contra el *Validador PY* del MIC porque la página desde la que
+se accede devuelve 404 (ver más abajo). Si lo probás, avisá cómo te fue.
 
 ## Licencia
 
