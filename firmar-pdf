@@ -145,6 +145,13 @@ MARGEN_SELLO = 2
 # para que el calculo del cuerpo, el render y la previsualizacion coincidan.
 INTERLINEA = 1.2
 
+# Proporciones de Helvetica usadas para ubicar la previsualizacion por linea
+# base. pyHanko apoya la linea base del ultimo renglon sobre el margen inferior
+# (medido: 1.4 pt en una caja de 220x70), asi que reservar una caja de linea
+# completa deja aire de mas: el descendente de esa ultima linea no se usa.
+ALTURA_MAYUSCULA = 0.717
+DESCENDENTE = 0.21
+
 # Alineacion del bloque de texto dentro del recuadro marcado.
 ALINEACIONES = {
     "abajo-izq": ("min", "min"),
@@ -285,22 +292,28 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq"):
         y0, y1 = min(y0, y1), max(y0, y1)
         m = MARGEN_SELLO * vista["dpi"] / 72.0
         interlinea = px * INTERLINEA
-        alto_bloque = len(lineas) * interlinea
+        n = len(lineas)
+        # alto de la tinta: los saltos entre lineas mas la altura de mayuscula
+        # de la primera. El descendente de la ultima no cuenta.
+        alto_tinta = (n - 1) * interlinea + px * ALTURA_MAYUSCULA
         ejes_x, ejes_y = ALINEACIONES[alineacion]
         if ejes_x == "min":
-            anclaje_x, x = "w", x0 + m
+            anclaje, x = "sw", x0 + m
         else:
-            anclaje_x, x = "center", (x0 + x1) / 2
-        if ejes_y == "min":       # abajo: y crece hacia abajo en el canvas
-            tope = y1 - m - alto_bloque
+            anclaje, x = "s", (x0 + x1) / 2
+        if ejes_y == "min":          # abajo: y crece hacia abajo en el canvas
+            base_ultima = y1 - m
         elif ejes_y == "max":
-            tope = y0 + m
+            base_ultima = y0 + m + alto_tinta
         else:
-            tope = (y0 + y1 - alto_bloque) / 2
-        anclaje = {"w": "nw", "center": "n"}[anclaje_x]
+            base_ultima = (y0 + y1 + alto_tinta) / 2
+        # Tk ubica el ancla "s" en el borde inferior del recuadro del texto, que
+        # cae un descendente por debajo de la linea base
+        desplazamiento = px * DESCENDENTE
         for i, linea in enumerate(lineas):
+            base = base_ultima - (n - 1 - i) * interlinea
             lienzo.create_text(
-                x, tope + i * interlinea, anchor=anclaje,
+                x, base + desplazamiento, anchor=anclaje,
                 text=linea, font=("Helvetica", -max(1, int(round(px)))),
                 fill="#000", tags="preview")
         return cuerpo
