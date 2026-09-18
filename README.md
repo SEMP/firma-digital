@@ -74,6 +74,14 @@ El cuerpo de letra del sello se calcula solo: el mayor con el que las tres
 líneas entran en el área que marcaste, sin recortarse. `--tamano-fuente` lo fija
 a mano si preferís.
 
+El texto se apoya abajo a la izquierda del recuadro, que es lo natural si lo
+marcás sobre una línea de firma. `--alineacion` acepta `abajo-izq` (default),
+`abajo-centro`, `centro` y `arriba-izq`.
+
+Mientras arrastrás, el selector dibuja el sello **como va a quedar**: mismo
+cuerpo de letra, misma alineación. El nombre sale de tu certificado, que se lee
+sin PIN (los certificados son objetos públicos del token).
+
 El PIN se pide en una ventana cuando usaste el selector visual, y por terminal
 en modo lote. `--pin-terminal` fuerza la terminal siempre. **Hay un solo
 intento**, a propósito: un PIN equivocado cuenta como fallo contra el token, que

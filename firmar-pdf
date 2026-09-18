@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-from pyhanko.pdf_utils import text as pdftext
+from pyhanko.pdf_utils import layout, text as pdftext
 from pyhanko.pdf_utils.font.basic import SimpleFontEngineFactory
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign import fields, signers
@@ -91,36 +91,87 @@ FORMATO_FECHA = "%Y.%m.%d %H:%M:%S %z"
 # Helvetica es una de las 14 fuentes estandar de PDF: se referencia sin incrustar.
 # pyHanko solo trae metricas de Courier (COURIER_META); sin meta el ancho es
 # aproximado, lo que solo afecta el calculo de encaje en la caja.
-# 0.5 subestimaba: pyHanko calcula el ancho como len(texto)*avg_width (un ratio
-# plano, ver SimpleFontEngine.shape), y una linea en mayusculas ocupa ~0.70 em
-# por caracter en Helvetica. El texto sobrante se recortaba contra el borde.
-FUENTE = SimpleFontEngineFactory("Helvetica", 0.70)
+# Anchos reales de Helvetica (AFM estandar, en milesimas de em) para ASCII
+# imprimible. Hacen falta porque pyHanko estima el ancho como
+# len(texto)*avg_width -- un ratio plano, ver SimpleFontEngine.shape() -- y con
+# un valor fijo el sello queda recortado (si subestima) o con espacio de sobra
+# (si sobreestima). El espacio mide 278, no ~500: es la diferencia mas grande.
+_W = {
+    " ": 278, "!": 278, '"': 355, "#": 556, "$": 556, "%": 889, "&": 667,
+    "'": 191, "(": 333, ")": 333, "*": 389, "+": 584, ",": 278, "-": 333,
+    ".": 278, "/": 278, ":": 278, ";": 278, "<": 584, "=": 584, ">": 584,
+    "?": 556, "@": 1015, "[": 278, "\\": 278, "]": 278, "^": 469, "_": 556,
+    "`": 333, "{": 334, "|": 260, "}": 334, "~": 584,
+    "A": 667, "B": 667, "C": 722, "D": 722, "E": 667, "F": 611, "G": 778,
+    "H": 722, "I": 278, "J": 500, "K": 667, "L": 556, "M": 833, "N": 722,
+    "O": 778, "P": 667, "Q": 778, "R": 722, "S": 667, "T": 611, "U": 722,
+    "V": 667, "W": 944, "X": 667, "Y": 667, "Z": 611,
+    "a": 556, "b": 556, "c": 500, "d": 556, "e": 556, "f": 278, "g": 556,
+    "h": 556, "i": 222, "j": 222, "k": 500, "l": 222, "m": 833, "n": 556,
+    "o": 556, "p": 556, "q": 556, "r": 333, "s": 500, "t": 278, "u": 556,
+    "v": 500, "w": 722, "x": 500, "y": 500, "z": 500,
+}
+_W.update({str(d): 556 for d in range(10)})
+# acentuadas y enie: mismo ancho que la letra base (asi es en Helvetica)
+for _con, _sin in (("ÁÀÂÄÃ", "A"), ("ÉÈÊË", "E"), ("ÍÌÎÏ", "I"),
+                   ("ÓÒÔÖÕ", "O"), ("ÚÙÛÜ", "U"), ("Ñ", "N"), ("Ç", "C"),
+                   ("áàâäã", "a"), ("éèêë", "e"), ("íìîï", "i"),
+                   ("óòôöõ", "o"), ("úùûü", "u"), ("ñ", "n"), ("ç", "c")):
+    _W.update({c: _W[_sin] for c in _con})
 
-# Anchos aproximados en em para Helvetica, por tipo de caracter. Alcanza para
-# elegir un cuerpo que entre en la caja sin recortar.
-_ANCHO_EM = {"alta": 0.70, "baja": 0.54, "otro": 0.52}
+
+def ancho_em(texto):
+    """Ancho del texto en em. Multiplicado por el cuerpo, da puntos."""
+    return sum(_W.get(c, 556) for c in texto) / 1000.0
 
 
-def ancho_estimado(texto):
-    """Ancho del texto en em (multiplicar por el cuerpo para tenerlo en puntos)."""
-    total = 0.0
-    for c in texto:
-        if c.isupper():
-            total += _ANCHO_EM["alta"]
-        elif c.islower():
-            total += _ANCHO_EM["baja"]
-        else:
-            total += _ANCHO_EM["otro"]
-    return total
+def fuente(textos):
+    """Helvetica con el avg_width promedio REAL de este texto.
+
+    pyHanko usa un unico ratio por fuente para ubicar el bloque dentro de la
+    caja; calcularlo sobre el texto concreto hace que el centrado sea correcto.
+    """
+    juntos = "".join(textos) or " "
+    return SimpleFontEngineFactory("Helvetica", ancho_em(juntos) / len(juntos))
 
 
-def cuerpo_que_entra(lineas, ancho_pt, alto_pt, maximo=11, minimo=4):
+# Margen interno del sello. pyHanko usa 10 por defecto (DEFAULT_TEXT_BOX_MARGIN),
+# que en una caja chica se come buena parte del ancho util; lo fijamos nosotros
+# para que coincida con el que usa cuerpo_que_entra() y con la previsualizacion.
+MARGEN_SELLO = 2
+
+# Interlineado como multiplo del cuerpo. pyHanko usa leading = font_size cuando
+# no se indica (TextStyle.leading), o sea 1.0: apretado. Lo fijamos explicito
+# para que el calculo del cuerpo, el render y la previsualizacion coincidan.
+INTERLINEA = 1.2
+
+# Alineacion del bloque de texto dentro del recuadro marcado.
+ALINEACIONES = {
+    "abajo-izq": ("min", "min"),
+    "abajo-centro": ("mid", "min"),
+    "centro": ("mid", "mid"),
+    "arriba-izq": ("min", "max"),
+}
+_EJES = {"min": layout.AxisAlignment.ALIGN_MIN,
+         "mid": layout.AxisAlignment.ALIGN_MID,
+         "max": layout.AxisAlignment.ALIGN_MAX}
+
+
+def regla_de_caja(alineacion):
+    x, y = ALINEACIONES[alineacion]
+    return layout.SimpleBoxLayoutRule(
+        x_align=_EJES[x], y_align=_EJES[y],
+        margins=layout.Margins.uniform(MARGEN_SELLO),
+    )
+
+
+def cuerpo_que_entra(lineas, ancho_pt, alto_pt, maximo=14, minimo=4):
     """Cuerpo de letra mas grande con el que las lineas entran en la caja."""
-    margen = 4  # pyHanko deja algo de aire; ademas evita que roce el borde
+    margen = MARGEN_SELLO
     util_x = max(1.0, ancho_pt - 2 * margen)
     util_y = max(1.0, alto_pt - 2 * margen)
-    por_ancho = util_x / max(ancho_estimado(l) for l in lineas)
-    por_alto = util_y / (len(lineas) * 1.25)   # 1.25 = interlineado aproximado
+    por_ancho = util_x / max(ancho_em(l) for l in lineas)
+    por_alto = util_y / (len(lineas) * INTERLINEA)
     return max(minimo, min(maximo, int(min(por_ancho, por_alto))))
 
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
@@ -143,7 +194,7 @@ def parse_caja(valor):
     return pagina, tuple(partes)
 
 
-def elegir_caja(pdf, pagina=1):
+def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq"):
     """Ventana con la pagina renderizada; devuelve (pagina, caja) o None.
 
     El rectangulo se arrastra con el mouse, igual que en Acrobat. Las
@@ -156,6 +207,7 @@ def elegir_caja(pdf, pagina=1):
     with open(pdf, "rb") as fh:
         total = PdfFileReader(fh).root["/Pages"]["/Count"]
 
+    lineas = lineas_del_sello(nombre)
     tmp = tempfile.mkdtemp(prefix="firmar-pdf-")
     estado = {"pagina": max(1, min(pagina, total)), "caja": None, "ok": False,
               "zoom": None}
@@ -219,13 +271,49 @@ def elegir_caja(pdf, pagina=1):
         f = 72.0 / vista["dpi"]
         return x_px * f, (vista["alto_px"] - y_px) * f
 
+    def dibujar_preview():
+        """Muestra el sello como va a quedar: mismo cuerpo de letra calculado."""
+        lienzo.delete("preview")
+        c = estado["caja"]
+        if not c:
+            return None
+        ancho_pt, alto_pt = c[2] - c[0], c[3] - c[1]
+        cuerpo = cuerpo_que_entra(lineas, ancho_pt, alto_pt)
+        px = cuerpo * vista["dpi"] / 72.0
+        x0, y0, x1, y1 = lienzo.coords(vista["rect"])
+        x0, x1 = min(x0, x1), max(x0, x1)
+        y0, y1 = min(y0, y1), max(y0, y1)
+        m = MARGEN_SELLO * vista["dpi"] / 72.0
+        interlinea = px * INTERLINEA
+        alto_bloque = len(lineas) * interlinea
+        ejes_x, ejes_y = ALINEACIONES[alineacion]
+        if ejes_x == "min":
+            anclaje_x, x = "w", x0 + m
+        else:
+            anclaje_x, x = "center", (x0 + x1) / 2
+        if ejes_y == "min":       # abajo: y crece hacia abajo en el canvas
+            tope = y1 - m - alto_bloque
+        elif ejes_y == "max":
+            tope = y0 + m
+        else:
+            tope = (y0 + y1 - alto_bloque) / 2
+        anclaje = {"w": "nw", "center": "n"}[anclaje_x]
+        for i, linea in enumerate(lineas):
+            lienzo.create_text(
+                x, tope + i * interlinea, anchor=anclaje,
+                text=linea, font=("Helvetica", -max(1, int(round(px)))),
+                fill="#000", tags="preview")
+        return cuerpo
+
     def actualizar():
         c = estado["caja"]
         base = f"Pagina {estado['pagina']}/{total}  ·  {estado['zoom']*100:.0f}%"
         if c is None:
             txt = f"{base}  ·  arrastra el area de la firma"
         else:
-            txt = f"{base}  ·  --caja {estado['pagina']}:{c[0]},{c[1]},{c[2]},{c[3]}"
+            cuerpo = dibujar_preview()
+            txt = (f"{base}  ·  letra {cuerpo} pt  ·  "
+                   f"--caja {estado['pagina']}:{c[0]},{c[1]},{c[2]},{c[3]}")
         etiqueta.config(text=txt)
         boton_ok.config(state="normal" if c else "disabled")
 
@@ -233,6 +321,7 @@ def elegir_caja(pdf, pagina=1):
 
     def press(e):
         inicio["x"], inicio["y"] = lienzo.canvasx(e.x), lienzo.canvasy(e.y)
+        lienzo.delete("preview")
         if vista["rect"]:
             lienzo.delete(vista["rect"])
         vista["rect"] = lienzo.create_rectangle(
@@ -321,6 +410,44 @@ def elegir_caja(pdf, pagina=1):
     return (estado["pagina"], estado["caja"]) if estado["ok"] else None
 
 
+
+
+
+def leer_nombre_del_token(lib, token_label=None, cert_label=None):
+    """CN del certificado, leido SIN PIN.
+
+    Los certificados son objetos publicos del token: se pueden leer con la
+    sesion sin autenticar (open_pkcs11_session con user_pin=None no hace login).
+    Sirve para previsualizar el sello antes de pedir el PIN. Devuelve None si
+    no se pudo leer: la previsualizacion usa un texto generico y listo.
+    """
+    try:
+        from asn1crypto import x509 as asn1x509
+        from pkcs11 import Attribute, ObjectClass
+
+        criterio = TokenCriteria(label=token_label) if token_label else None
+        sesion = open_pkcs11_session(lib, token_criteria=criterio, user_pin=None)
+        try:
+            consulta = {Attribute.CLASS: ObjectClass.CERTIFICATE}
+            if cert_label:
+                consulta[Attribute.LABEL] = cert_label
+            for obj in sesion.get_objects(consulta):
+                cert = asn1x509.Certificate.load(bytes(obj[Attribute.VALUE]))
+                cn = cert.subject.native.get("common_name")
+                if cn:
+                    return cn
+        finally:
+            sesion.close()
+    except Exception:
+        pass
+    return None
+
+
+def lineas_del_sello(nombre):
+    return (TEXTO_SELLO % {
+        "signer": nombre or "NOMBRE DEL FIRMANTE",
+        "ts": datetime.now().astimezone().strftime(FORMATO_FECHA),
+    }).splitlines()
 
 
 def destino_por_defecto(entrada):
@@ -439,6 +566,10 @@ def main():
     p.add_argument("--tamano-fuente", type=int, default=None,
                    help="cuerpo del texto del sello; por defecto se calcula "
                         "el mayor que entre en la caja elegida")
+    p.add_argument("--alineacion", choices=sorted(ALINEACIONES),
+                   default="abajo-izq",
+                   help="posicion del texto dentro del recuadro (default: "
+                        "abajo-izq, que apoya el sello sobre la linea de firma)")
     p.add_argument("--forzar", action="store_true",
                    help="sobrescribir el archivo de salida si ya existe")
     p.add_argument("--pin-terminal", action="store_true",
@@ -473,16 +604,18 @@ def main():
     if os.path.exists(a.salida) and not a.forzar:
         p.error(f"{a.salida} ya existe; usa --forzar o indica otro nombre")
 
+    lib, token_label, cert_label, key_label = resolver_token(a)
+
     uso_selector = not a.invisible and a.caja is None
     if uso_selector:
-        elegida = elegir_caja(a.entrada, a.pagina)
+        elegida = elegir_caja(
+            a.entrada, a.pagina,
+            leer_nombre_del_token(lib, token_label, cert_label), a.alineacion)
         if elegida is None:
             print("Cancelado, no se firmo nada.", file=sys.stderr)
             return 1
         a.caja = elegida
         print(f"Area elegida: --caja {a.caja[0]}:" + ",".join(map(str, a.caja[1])))
-
-    lib, token_label, cert_label, key_label = resolver_token(a)
 
     pin = pedir_pin(uso_selector and not a.pin_terminal)
     if pin is None:
@@ -521,11 +654,26 @@ def main():
                 cuerpo = cuerpo_que_entra(
                     muestra.splitlines(), box[2] - box[0], box[3] - box[1]
                 )
+            else:
+                muestra = TEXTO_SELLO % {
+                    "signer": nombre,
+                    "ts": datetime.now().astimezone().strftime(FORMATO_FECHA),
+                }
             estilo = TextStampStyle(
                 stamp_text=TEXTO_SELLO,
                 timestamp_format=FORMATO_FECHA,
+                # inner_content_layout ubica el bloque dentro del recuadro del
+                # sello; box_layout_rule solo acomoda el texto dentro de su
+                # propia caja (por eso ahi va sin margenes)
+                inner_content_layout=regla_de_caja(a.alineacion),
                 text_box_style=pdftext.TextBoxStyle(
-                    font=FUENTE, font_size=cuerpo
+                    font=fuente(muestra.splitlines()), font_size=cuerpo,
+                    leading=int(round(cuerpo * INTERLINEA)),
+                    box_layout_rule=layout.SimpleBoxLayoutRule(
+                        x_align=layout.AxisAlignment.ALIGN_MIN,
+                        y_align=layout.AxisAlignment.ALIGN_MIN,
+                        margins=layout.Margins.uniform(0),
+                    ),
                 ),
                 border_width=0,   # Acrobat no dibuja recuadro
                 background=None,

@@ -88,6 +88,16 @@ Detalles de pyHanko que cuesta descubrir:
   (`SimpleFontEngineFactory` solo trae métricas de Courier; Helvetica se
   referencia sin metadata por ser una de las 14 fuentes estándar de PDF) y
   `border_width=3`, que dibuja un recuadro que Acrobat no pone.
+- **`inner_content_layout` vs `box_layout_rule`**: el primero (en
+  `TextStampStyle`) ubica el bloque **dentro del recuadro del sello**; el
+  segundo (en `TextBoxStyle`) solo acomoda el texto dentro de su propia caja.
+  Poner la alineación en el segundo no tiene efecto visible sobre dónde cae el
+  sello: queda el default, centrado en ambos ejes.
+- **El interlineado por defecto es igual al cuerpo** (`TextStyle.leading` en
+  `None` ⇒ se usa `font_size`). Conviene fijarlo explícito si algo más —una
+  previsualización, un cálculo de encaje— necesita predecir el alto del bloque.
+- **`DEFAULT_TEXT_BOX_MARGIN` es 10 pt por lado**, que en un recuadro chico se
+  come buena parte del ancho útil.
 - **El ancho del texto se estima con un ratio plano**: `SimpleFontEngine.shape()`
   calcula `len(texto) * avg_width`, sin mirar las métricas reales por carácter.
   Con `avg_width=0.5` una línea en mayúsculas —un nombre completo, justamente—
