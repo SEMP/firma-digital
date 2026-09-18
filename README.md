@@ -78,6 +78,11 @@ El texto se apoya abajo a la izquierda del recuadro, que es lo natural si lo
 marcás sobre una línea de firma. `--alineacion` acepta `abajo-izq` (default),
 `abajo-centro`, `centro` y `arriba-izq`.
 
+Los bordes que anclan quedan exactos (~2 pt del borde). Las variantes
+**centradas son aproximadas**: pyHanko calcula el ancho del bloque con un único
+ratio por fuente, y una línea toda en mayúsculas es más ancha que ese promedio,
+así que el reparto no queda parejo. Medido con `tools/probar-sello.py`.
+
 Mientras arrastrás, el selector dibuja el sello **como va a quedar**: mismo
 cuerpo de letra, misma alineación. El nombre sale de tu certificado, que se lee
 sin PIN (los certificados son objetos públicos del token).
@@ -119,6 +124,23 @@ pkcs11-tool --module /ruta/al/modulo.so -O -l
 bloqueo de campos, no una certificación DocMDP. Todo esto fue medido contra un
 PDF firmado con Acrobat y replicado campo por campo:
 [docs/formato-acrobat.md](docs/formato-acrobat.md).
+
+## Calibrar la apariencia sin firmar
+
+`tools/probar-sello.py` estampa el sello con el mismo estilo que `firmar-pdf`
+pero **sin firmar**: no necesita el token ni gasta intentos de PIN. Después mide
+sobre el PDF renderizado dónde cayó la tinta.
+
+```
+$ tools/probar-sello.py documento.pdf --caja 1:340,70,560,140
+documento_sello.pdf
+caja 220x70 pt en la pagina 1, alineacion abajo-izq, cuerpo 12 pt
+margenes de la tinta: izq 2.5  der 9.4  arriba 31.0  abajo 1.4 pt
+bloque de texto: 207.7 x 34.6 pt
+```
+
+Es la forma de verificar cualquier cambio en el sello. Necesita `mutool`
+(`mupdf-tools`); no usa Pillow ni numpy.
 
 ## Estado
 
