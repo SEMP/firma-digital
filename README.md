@@ -120,7 +120,8 @@ pkcs11-tool --module /ruta/al/modulo.so -O -l
 ## Validar un PDF firmado
 
 ```bash
-validar-pdf documento_firmado.pdf
+validar-pdf                          # elige el archivo y muestra el informe en una ventana
+validar-pdf documento_firmado.pdf    # informe en la terminal
 ```
 
 ```
@@ -135,6 +136,11 @@ Firma 1 de 1
   [OK   ] Confianza     el certificado encadena a una raiz confiable
   [OK   ] Bloqueo       no hubo cambios prohibidos por el bloqueo
 ```
+
+Sin argumentos abre un selector de archivos y presenta el resultado en una
+ventana, con una banda verde o roja según el veredicto. Si le pasás la ruta, el
+informe va a la terminal; `--terminal` fuerza ese modo también al elegir por
+diálogo.
 
 Devuelve 0 si todas las firmas están bien y 1 si alguna falla, así que sirve en
 scripts. Los certificados de las CA salen de `certificados/` (viene con la raíz

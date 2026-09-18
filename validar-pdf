@@ -2,6 +2,7 @@
 """Valida las firmas digitales de un PDF contra la cadena de confianza paraguaya.
 
     validar-pdf documento_firmado.pdf
+    validar-pdf                      # elige el archivo y muestra el informe en una ventana
 
 Informa, por cada firma: quien firmo, cuando, si el documento esta intacto, si la
 firma cubre todo el archivo, y si el certificado encadena a una raiz de confianza.
@@ -16,6 +17,7 @@ Mercosur tambien sirve el argentino: https://validadordefirmas.gob.ar
 """
 import argparse
 import logging
+import os
 import pathlib
 import sys
 
@@ -65,6 +67,22 @@ def cargar_certificados(rutas):
     return certs
 
 
+def elegir_pdf():
+    """Dialogo para elegir el PDF. Devuelve None si se cancela."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        return filedialog.askopenfilename(
+            title="Elegir el PDF firmado a validar",
+            filetypes=[("Documentos PDF", "*.pdf"), ("Todos los archivos", "*.*")],
+        ) or None
+    finally:
+        root.destroy()
+
+
 def nombre_comun(cert):
     try:
         return cert.subject.native.get("common_name", "(sin CN)")
@@ -72,36 +90,110 @@ def nombre_comun(cert):
         return "(ilegible)"
 
 
-def informar(i, st, total):
-    cabecera = f"Firma {i} de {total}"
-    print(f"\n{cabecera}\n{'-' * len(cabecera)}")
-    print(f"  Firmante   : {nombre_comun(st.signing_cert)}")
-    emisor = st.signing_cert.issuer.native.get("common_name", "?")
-    print(f"  Emisor     : {emisor}")
-    if st.signer_reported_dt:
-        # la firma guarda la hora en UTC; se muestra en la zona local
-        local = st.signer_reported_dt.astimezone()
-        print(f"  Fecha      : {local:%Y-%m-%d %H:%M:%S %z}")
-
+def resumir(st):
+    """Convierte el estado de pyHanko en algo presentable en texto o en ventana."""
     cubre_todo = st.coverage == SignatureCoverageLevel.ENTIRE_FILE
     filas = [
-        ("Integridad  ", st.intact, "el documento no fue alterado tras firmar"),
-        ("Cobertura   ", cubre_todo, "la firma abarca todo el archivo"),
-        ("Confianza   ", st.trusted, "el certificado encadena a una raiz confiable"),
+        ("Integridad", st.intact, "el documento no fue alterado tras firmar"),
+        ("Cobertura", cubre_todo, "la firma abarca todo el archivo"),
+        ("Confianza", st.trusted, "el certificado encadena a una raiz confiable"),
     ]
     if st.docmdp_ok is not None:
-        filas.append(("Bloqueo     ", st.docmdp_ok,
+        filas.append(("Bloqueo", st.docmdp_ok,
                       "no hubo cambios prohibidos por el bloqueo"))
-    print()
-    for etiqueta, valor, detalle in filas:
-        marca = OK if valor else MAL
-        print(f"  [{marca}] {etiqueta}  {detalle}")
-    return st.intact and cubre_todo and st.trusted and (st.docmdp_ok is not False)
+    fecha = None
+    if st.signer_reported_dt:
+        # la firma guarda la hora en UTC; se muestra en la zona local
+        fecha = f"{st.signer_reported_dt.astimezone():%Y-%m-%d %H:%M:%S %z}"
+    return {
+        "firmante": nombre_comun(st.signing_cert),
+        "emisor": st.signing_cert.issuer.native.get("common_name", "?"),
+        "fecha": fecha,
+        "filas": filas,
+        "ok": all(v for _, v, _ in filas),
+    }
+
+
+def render_texto(pdf, resumenes, n_cas):
+    print(f"{pdf}: {len(resumenes)} firma(s), {n_cas} certificado(s) de CA cargados")
+    for i, r in enumerate(resumenes, 1):
+        cabecera = f"Firma {i} de {len(resumenes)}"
+        print(f"\n{cabecera}\n{'-' * len(cabecera)}")
+        print(f"  Firmante   : {r['firmante']}")
+        print(f"  Emisor     : {r['emisor']}")
+        if r["fecha"]:
+            print(f"  Fecha      : {r['fecha']}")
+        print()
+        for etiqueta, valor, detalle in r["filas"]:
+            print(f"  [{OK if valor else MAL}] {etiqueta:<12}  {detalle}")
+    todo = all(r["ok"] for r in resumenes)
+    print("\n" + ("Todas las firmas son validas y confiables."
+                  if todo else "Hay firmas con problemas (ver arriba)."))
+
+
+def render_gui(pdf, resumenes, n_cas):
+    import tkinter as tk
+
+    todo = all(r["ok"] for r in resumenes)
+    win = tk.Tk()
+    win.title(f"Validacion — {pathlib.Path(pdf).name}")
+
+    banda = tk.Frame(win, bg="#1b7f4b" if todo else "#a12", padx=16, pady=12)
+    banda.pack(fill="x")
+    tk.Label(banda, bg=banda["bg"], fg="white", font=("TkDefaultFont", 13, "bold"),
+             text=("Firma valida y confiable" if todo
+                   else "La firma tiene problemas")).pack(anchor="w")
+    tk.Label(banda, bg=banda["bg"], fg="white",
+             text=pathlib.Path(pdf).name).pack(anchor="w")
+
+    cuerpo = tk.Frame(win, padx=16, pady=12)
+    cuerpo.pack(fill="both", expand=True)
+    for i, r in enumerate(resumenes, 1):
+        if len(resumenes) > 1:
+            tk.Label(cuerpo, text=f"Firma {i} de {len(resumenes)}",
+                     font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(8, 2))
+        datos = [("Firmante", r["firmante"]), ("Emisor", r["emisor"])]
+        if r["fecha"]:
+            datos.append(("Fecha", r["fecha"]))
+        for etiqueta, valor in datos:
+            fila = tk.Frame(cuerpo)
+            fila.pack(fill="x")
+            tk.Label(fila, text=f"{etiqueta}:", width=10, anchor="w",
+                     fg="#666").pack(side="left")
+            tk.Label(fila, text=valor, anchor="w").pack(side="left")
+        tk.Frame(cuerpo, height=8).pack()
+        for etiqueta, valor, detalle in r["filas"]:
+            fila = tk.Frame(cuerpo)
+            fila.pack(fill="x", pady=1)
+            tk.Label(fila, text="✓" if valor else "✗", width=2,
+                     fg="#1b7f4b" if valor else "#a12",
+                     font=("TkDefaultFont", 11, "bold")).pack(side="left")
+            tk.Label(fila, text=etiqueta, width=11, anchor="w",
+                     font=("TkDefaultFont", 10, "bold")).pack(side="left")
+            tk.Label(fila, text=detalle, anchor="w", fg="#444").pack(side="left")
+
+    pie = tk.Frame(win, padx=16, pady=10)
+    pie.pack(fill="x")
+    tk.Label(pie, fg="#666", justify="left", anchor="w", text=(
+        f"{n_cas} certificado(s) de CA cargados.\n"
+        "Esto no reemplaza al validador oficial: no dictamina validez legal."
+    )).pack(side="left")
+    tk.Button(pie, text="Cerrar", command=win.destroy).pack(side="right")
+
+    win.bind("<Escape>", lambda e: win.destroy())
+    win.update_idletasks()
+    win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}+80")
+    win.mainloop()
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("pdf")
+    p.add_argument("pdf", nargs="?", default=None,
+                   help="PDF a validar; si se omite, se elige por dialogo y el "
+                        "informe se muestra en una ventana")
+    p.add_argument("--terminal", action="store_true",
+                   help="mostrar el informe en la terminal aunque se haya "
+                        "elegido el archivo por dialogo")
     p.add_argument("--ca", action="append", default=[], metavar="RUTA",
                    help="certificado o carpeta de certificados extra (repetible)")
     p.add_argument("--sin-ca-propias", action="store_true",
@@ -112,6 +204,17 @@ def main():
                    help="exigir comprobacion de revocacion en linea (OCSP/CRL); "
                         "por defecto se hace en modo tolerante")
     a = p.parse_args()
+
+    hay_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    usar_gui = False
+    if a.pdf is None:
+        if not hay_display:
+            p.error("sin entorno grafico hay que indicar el PDF a validar")
+        a.pdf = elegir_pdf()
+        if a.pdf is None:
+            print("Cancelado.", file=sys.stderr)
+            return 1
+        usar_gui = not a.terminal
 
     if not a.verboso:
         # pyHanko registra la excepcion de cadena no encontrada con su traza
@@ -137,18 +240,27 @@ def main():
         lector = PdfFileReader(fh)
         firmas = lector.embedded_signatures
         if not firmas:
-            print("El documento no tiene firmas digitales.")
+            aviso = "El documento no tiene firmas digitales."
+            if usar_gui:
+                import tkinter as tk
+                from tkinter import messagebox
+                raiz = tk.Tk()
+                raiz.withdraw()
+                messagebox.showwarning("Sin firmas", aviso)
+                raiz.destroy()
+            else:
+                print(aviso)
             return 1
-        print(f"{a.pdf}: {len(firmas)} firma(s), "
-              f"{len(raices)} certificado(s) de CA cargados")
-        todo_bien = True
-        for i, firma in enumerate(firmas, 1):
-            st = validate_pdf_signature(firma, signer_validation_context=contexto)
-            todo_bien &= informar(i, st, len(firmas))
+        resumenes = [
+            resumir(validate_pdf_signature(f, signer_validation_context=contexto))
+            for f in firmas
+        ]
 
-    print("\n" + ("Todas las firmas son validas y confiables."
-                  if todo_bien else "Hay firmas con problemas (ver arriba)."))
-    return 0 if todo_bien else 1
+    if usar_gui:
+        render_gui(a.pdf, resumenes, len(raices))
+    else:
+        render_texto(a.pdf, resumenes, len(raices))
+    return 0 if all(r["ok"] for r in resumenes) else 1
 
 
 if __name__ == "__main__":
