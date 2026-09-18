@@ -88,6 +88,13 @@ Detalles de pyHanko que cuesta descubrir:
   (`SimpleFontEngineFactory` solo trae métricas de Courier; Helvetica se
   referencia sin metadata por ser una de las 14 fuentes estándar de PDF) y
   `border_width=3`, que dibuja un recuadro que Acrobat no pone.
+- **El ancho del texto se estima con un ratio plano**: `SimpleFontEngine.shape()`
+  calcula `len(texto) * avg_width`, sin mirar las métricas reales por carácter.
+  Con `avg_width=0.5` una línea en mayúsculas —un nombre completo, justamente—
+  se subestima cerca de un 40% y el sobrante **se recorta** contra el borde del
+  recuadro. En Helvetica las mayúsculas ocupan ~0.70 em. Esta herramienta usa
+  0.70 y además calcula el cuerpo de letra que entra en la caja elegida
+  (`cuerpo_que_entra()`), midiendo cada línea por tipo de carácter.
 
 ## Cómo inspeccionar un PDF firmado
 

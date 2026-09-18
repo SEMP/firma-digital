@@ -16,6 +16,7 @@ Parametros verificados contra un PDF firmado en la HP con Acrobat (2026-09-18):
 import argparse
 import configparser
 import getpass
+from datetime import datetime
 import os
 import pathlib
 import subprocess
@@ -90,7 +91,37 @@ FORMATO_FECHA = "%Y.%m.%d %H:%M:%S %z"
 # Helvetica es una de las 14 fuentes estandar de PDF: se referencia sin incrustar.
 # pyHanko solo trae metricas de Courier (COURIER_META); sin meta el ancho es
 # aproximado, lo que solo afecta el calculo de encaje en la caja.
-FUENTE = SimpleFontEngineFactory("Helvetica", 0.5)
+# 0.5 subestimaba: pyHanko calcula el ancho como len(texto)*avg_width (un ratio
+# plano, ver SimpleFontEngine.shape), y una linea en mayusculas ocupa ~0.70 em
+# por caracter en Helvetica. El texto sobrante se recortaba contra el borde.
+FUENTE = SimpleFontEngineFactory("Helvetica", 0.70)
+
+# Anchos aproximados en em para Helvetica, por tipo de caracter. Alcanza para
+# elegir un cuerpo que entre en la caja sin recortar.
+_ANCHO_EM = {"alta": 0.70, "baja": 0.54, "otro": 0.52}
+
+
+def ancho_estimado(texto):
+    """Ancho del texto en em (multiplicar por el cuerpo para tenerlo en puntos)."""
+    total = 0.0
+    for c in texto:
+        if c.isupper():
+            total += _ANCHO_EM["alta"]
+        elif c.islower():
+            total += _ANCHO_EM["baja"]
+        else:
+            total += _ANCHO_EM["otro"]
+    return total
+
+
+def cuerpo_que_entra(lineas, ancho_pt, alto_pt, maximo=11, minimo=4):
+    """Cuerpo de letra mas grande con el que las lineas entran en la caja."""
+    margen = 4  # pyHanko deja algo de aire; ademas evita que roce el borde
+    util_x = max(1.0, ancho_pt - 2 * margen)
+    util_y = max(1.0, alto_pt - 2 * margen)
+    por_ancho = util_x / max(ancho_estimado(l) for l in lineas)
+    por_alto = util_y / (len(lineas) * 1.25)   # 1.25 = interlineado aproximado
+    return max(minimo, min(maximo, int(min(por_ancho, por_alto))))
 
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 
@@ -290,10 +321,111 @@ def elegir_caja(pdf, pagina=1):
     return (estado["pagina"], estado["caja"]) if estado["ok"] else None
 
 
+
+
+def destino_por_defecto(entrada):
+    """documento.pdf -> documento_firmado.pdf (en la misma carpeta)."""
+    ruta = pathlib.Path(entrada)
+    return str(ruta.with_name(ruta.stem + "_firmado" + (ruta.suffix or ".pdf")))
+
+
+def elegir_archivos(entrada, salida):
+    """Completa por dialogo los archivos que no vinieron por linea de comandos.
+
+    Devuelve (entrada, salida) o (None, None) si se cancela. El dialogo de
+    destino viene precargado con <nombre>_firmado.pdf.
+    """
+    import tkinter as tk
+    from tkinter import filedialog
+
+    tipos = [("Documentos PDF", "*.pdf"), ("Todos los archivos", "*.*")]
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        if entrada is None:
+            entrada = filedialog.askopenfilename(
+                title="Elegir el PDF a firmar", filetypes=tipos)
+            if not entrada:
+                return None, None
+        if salida is None:
+            sugerido = pathlib.Path(destino_por_defecto(entrada))
+            salida = filedialog.asksaveasfilename(
+                title="Guardar el PDF firmado como",
+                initialdir=str(sugerido.parent), initialfile=sugerido.name,
+                defaultextension=".pdf", filetypes=tipos)
+            if not salida:
+                return None, None
+    finally:
+        root.destroy()
+    return entrada, salida
+
+
+def pedir_pin_gui(titulo="Firma digital"):
+    """Pide el PIN en una ventana. Devuelve None si el usuario cancela.
+
+    Se usa cuando el area se eligio con el selector visual: saltar a la terminal
+    a mitad del flujo es incomodo. En modo lote (--caja / --invisible) se sigue
+    pidiendo por terminal con getpass.
+    """
+    import tkinter as tk
+
+    resultado = {"pin": None}
+    win = tk.Tk()
+    win.title(titulo)
+    win.resizable(False, False)
+
+    marco = tk.Frame(win, padx=18, pady=14)
+    marco.pack()
+    tk.Label(marco, text="PIN del token", anchor="w").pack(fill="x")
+    entrada = tk.Entry(marco, show="\u2022", width=28, font=("TkDefaultFont", 12))
+    entrada.pack(pady=(4, 2))
+    aviso = tk.Label(marco, fg="#a00", text="", anchor="w")
+    aviso.pack(fill="x")
+
+    def aceptar(*_):
+        valor = entrada.get()
+        if not valor:
+            aviso.config(text="Ingresa el PIN")
+            return
+        resultado["pin"] = valor
+        win.destroy()
+
+    botones = tk.Frame(marco)
+    botones.pack(fill="x", pady=(8, 0))
+    tk.Button(botones, text="Cancelar", command=win.destroy).pack(side="right", padx=4)
+    tk.Button(botones, text="Firmar", command=aceptar, default="active").pack(side="right")
+
+    win.bind("<Return>", aceptar)
+    win.bind("<Escape>", lambda e: win.destroy())
+    entrada.focus_set()
+
+    win.update_idletasks()
+    x = (win.winfo_screenwidth() - win.winfo_width()) // 2
+    y = (win.winfo_screenheight() - win.winfo_height()) // 3
+    win.geometry(f"+{x}+{y}")
+    win.attributes("-topmost", True)
+    win.mainloop()
+    return resultado["pin"]
+
+
+def pedir_pin(usar_gui):
+    """Un unico intento: un PIN equivocado cuenta como fallo en el token, que se
+    bloquea a los 3 (ver docs/instalacion.md). Por eso no hay reintento."""
+    hay_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if usar_gui and hay_display:
+        try:
+            return pedir_pin_gui()
+        except Exception:
+            pass  # sin entorno grafico utilizable, cae a la terminal
+    return getpass.getpass("PIN del token: ")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("entrada")
-    p.add_argument("salida")
+    p.add_argument("entrada", nargs="?", default=None,
+                   help="PDF a firmar; si se omite, se elige por dialogo")
+    p.add_argument("salida", nargs="?", default=None,
+                   help="PDF de salida; por defecto <nombre>_firmado.pdf")
     p.add_argument("--caja", type=parse_caja, default=None, metavar="P:X1,Y1,X2,Y2",
                    help="posicion del sello en puntos PDF (origen abajo-izquierda); "
                         "salteando el selector visual. Para lotes")
@@ -304,7 +436,13 @@ def main():
     p.add_argument("--campo", default="Firma1", help="nombre del campo de firma")
     p.add_argument("--sin-bloqueo", action="store_true",
                    help="no bloquear los campos tras firmar")
-    p.add_argument("--tamano-fuente", type=int, default=8)
+    p.add_argument("--tamano-fuente", type=int, default=None,
+                   help="cuerpo del texto del sello; por defecto se calcula "
+                        "el mayor que entre en la caja elegida")
+    p.add_argument("--forzar", action="store_true",
+                   help="sobrescribir el archivo de salida si ya existe")
+    p.add_argument("--pin-terminal", action="store_true",
+                   help="pedir el PIN por terminal aunque se use el selector visual")
     p.add_argument("--motivo", default=None)
     p.add_argument("--lugar", default=None)
     g = p.add_argument_group("token (opcional: por defecto se autodetecta)")
@@ -318,7 +456,25 @@ def main():
     if a.invisible and a.caja is not None:
         p.error("--invisible y --caja son excluyentes")
 
-    if not a.invisible and a.caja is None:
+    hay_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if a.entrada is None:
+        if not hay_display:
+            p.error("sin entorno grafico hay que indicar el PDF a firmar")
+        a.entrada, a.salida = elegir_archivos(None, a.salida)
+        if a.entrada is None:
+            print("Cancelado, no se firmo nada.", file=sys.stderr)
+            return 1
+    elif a.salida is None:
+        # con la entrada dada por linea de comandos, el destino se deriva solo
+        a.salida = destino_por_defecto(a.entrada)
+
+    if not os.path.isfile(a.entrada):
+        p.error(f"no existe el archivo {a.entrada}")
+    if os.path.exists(a.salida) and not a.forzar:
+        p.error(f"{a.salida} ya existe; usa --forzar o indica otro nombre")
+
+    uso_selector = not a.invisible and a.caja is None
+    if uso_selector:
         elegida = elegir_caja(a.entrada, a.pagina)
         if elegida is None:
             print("Cancelado, no se firmo nada.", file=sys.stderr)
@@ -328,7 +484,10 @@ def main():
 
     lib, token_label, cert_label, key_label = resolver_token(a)
 
-    pin = getpass.getpass("PIN del token: ")
+    pin = pedir_pin(uso_selector and not a.pin_terminal)
+    if pin is None:
+        print("Cancelado, no se firmo nada.", file=sys.stderr)
+        return 1
     criterio = TokenCriteria(label=token_label) if token_label else None
     session = open_pkcs11_session(lib, token_criteria=criterio, user_pin=pin)
     try:
@@ -352,16 +511,25 @@ def main():
         if a.caja is not None:
             pagina, box = a.caja
             spec_extra.update(on_page=pagina - 1, box=box)
+            nombre = signer.signing_cert.subject.native.get("common_name", "")
+            cuerpo = a.tamano_fuente
+            if cuerpo is None:
+                muestra = TEXTO_SELLO % {
+                    "signer": nombre,
+                    "ts": datetime.now().astimezone().strftime(FORMATO_FECHA),
+                }
+                cuerpo = cuerpo_que_entra(
+                    muestra.splitlines(), box[2] - box[0], box[3] - box[1]
+                )
             estilo = TextStampStyle(
                 stamp_text=TEXTO_SELLO,
                 timestamp_format=FORMATO_FECHA,
                 text_box_style=pdftext.TextBoxStyle(
-                    font=FUENTE, font_size=a.tamano_fuente
+                    font=FUENTE, font_size=cuerpo
                 ),
                 border_width=0,   # Acrobat no dibuja recuadro
                 background=None,
             )
-            nombre = signer.signing_cert.subject.native.get("common_name", "")
             text_params = {"signer": nombre}
 
         with open(a.entrada, "rb") as fh:

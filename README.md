@@ -48,17 +48,36 @@ sudo install -m755 firmar-pdf /usr/local/bin/firmar-pdf
 ## Uso
 
 ```bash
-firmar-pdf doc.pdf firmado.pdf                          # selector visual (default)
-firmar-pdf doc.pdf firmado.pdf --caja 1:340,70,560,140  # sin ventana, para lotes
-firmar-pdf doc.pdf firmado.pdf --invisible              # sin sello visible
-firmar-pdf doc.pdf firmado.pdf --sin-bloqueo            # sin bloquear los campos
+firmar-pdf                                   # todo por ventanas
+firmar-pdf doc.pdf                           # salida: doc_firmado.pdf
+firmar-pdf doc.pdf otro.pdf                  # nombre de salida explícito
+firmar-pdf doc.pdf --caja 1:340,70,560,140   # sin ventana, para lotes
+firmar-pdf doc.pdf --invisible               # sin sello visible
+firmar-pdf doc.pdf --sin-bloqueo             # sin bloquear los campos
 ```
 
-En el selector: arrastrás el área, `<` `>` cambian de página, `+` `−` y *Ajustar*
-controlan el zoom, la rueda del mouse hace scroll. **Enter** firma, **Escape**
-cancela. Al confirmar imprime el `--caja` equivalente, para reusarlo en lote.
+Sin argumentos, el recorrido es: elegir el PDF → guardar como (precargado con
+`<nombre>_firmado.pdf`) → marcar el área del sello → PIN. Todo en ventanas.
+
+Si indicás el PDF por línea de comandos pero no el destino, se deriva solo
+(`documento.pdf` → `documento_firmado.pdf`) sin abrir diálogo. Si el destino ya
+existe, corta con un error; `--forzar` lo sobrescribe.
+
+En el selector de área: arrastrás el rectángulo, `<` `>` cambian de página,
+`+` `−` y *Ajustar* controlan el zoom, la rueda del mouse hace scroll. **Enter**
+firma, **Escape** cancela. Al confirmar imprime el `--caja` equivalente, para
+reusarlo en lote.
 
 `--caja` usa **puntos PDF con origen abajo-izquierda** (A4 = 595×842).
+
+El cuerpo de letra del sello se calcula solo: el mayor con el que las tres
+líneas entran en el área que marcaste, sin recortarse. `--tamano-fuente` lo fija
+a mano si preferís.
+
+El PIN se pide en una ventana cuando usaste el selector visual, y por terminal
+en modo lote. `--pin-terminal` fuerza la terminal siempre. **Hay un solo
+intento**, a propósito: un PIN equivocado cuenta como fallo contra el token, que
+se bloquea a los tres.
 
 ## Configuración
 
