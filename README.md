@@ -199,6 +199,22 @@ la firma marcada como **Válida**.
 No se pudo probar contra el *Validador PY* del MIC porque la página desde la que
 se accede devuelve 404 (ver más abajo). Si lo probás, avisá cómo te fue.
 
+## En Windows
+
+Esta herramienta es para Linux. En Windows el middleware del token publica el
+certificado en el **almacén de certificados del sistema**, y de ahí lo toman las
+aplicaciones — no hace falta lidiar con PKCS#11 ni con el
+`CKA_ALWAYS_AUTHENTICATE` que rompe a los firmadores de Linux.
+
+Un camino que funciona, probado el 2026-09-21: **Adobe Acrobat Reader** (el
+gratuito, no hace falta la versión paga) con el middleware del token instalado.
+El PDF resultante da los mismos parámetros que produce esta herramienta —
+`adbe.pkcs7.detached`, SHA-256, bloqueo `FieldMDP`, sin sello de tiempo— y pasa
+`validar-pdf` sin observaciones.
+
+No es la única opción ni necesariamente la mejor: **Foxit PDF Reader** también es
+gratuito y firma tomando los IDs del almacén de Windows. No está probado acá.
+
 ## Licencia
 
 MIT — ver [LICENSE](LICENSE).
