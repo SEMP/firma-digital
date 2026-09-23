@@ -7,13 +7,30 @@ Pública del Paraguay. Son certificados **públicos**: se incluyen acá solo par
 | Archivo | Titular | Vence |
 |---|---|---|
 | `ac_raiz_paraguay.pem` | Autoridad Certificadora Raíz del Paraguay (MIC) | 2032-08-07 |
+| `vit_efirma.pem` | VIT S.A. (eFirma) | 2031-08-23 |
+| `code100.pem` | CODE100 S.A. | 2032-01-24 |
+| `documenta.pem` | CA-DOCUMENTA S.A. | 2032-03-28 |
+| `ministerio_interior.pem` | Ministerio del Interior | 2032-03-31 |
 | `sos_tecnologia.pem` | SOS TECNOLOGIA Y GESTION DE INFORMACION LTDA | 2032-05-26 |
+| `confirma.pem` | CONFIRMA S.A. | 2032-05-29 |
+| `itti.pem` | ITTI SAECA | 2032-06-26 |
+
+Son **los siete prestadores cualificados acreditados** al 2026-09-23, más la raíz.
+Con esto se valida cualquier firma emitida bajo la ICPP sin configurar nada.
 
 ## De dónde salen
 
 ```
 https://www.acraiz.gov.py/adjunt/ac_raiz_py_sha256.crt
-https://www.acraiz.gov.py/adjunt/Certificados/SOS%20DOCS.crt
+https://www.acraiz.gov.py/adjunt/Certificados/<nombre>.crt
+```
+
+Los certificados vienen en **DER** y hay que convertirlos a PEM. Ojo que algunos
+prestadores publican dos: el viejo y el vigente (`ca-code100.crt` venció en 2025,
+el bueno es `CODE100-2023.crt`). Verificar siempre la fecha:
+
+```bash
+openssl x509 -in certificado.pem -noout -subject -enddate
 ```
 
 La lista completa de prestadores cualificados está en
