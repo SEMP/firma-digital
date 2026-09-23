@@ -97,6 +97,23 @@ def nombre_comun(cert):
         return "(ilegible)"
 
 
+def es_linealizado(emb):
+    """True si el PDF esta linealizado ("vista web rapida").
+
+    En esos archivos el startxref final apunta a la tabla del principio, y la
+    comprobacion de cobertura de pyHanko no lo contempla: no puede identificar
+    la revision firmada, y al no poder hacerlo **salta el analisis de cambios** y
+    reporta ModificationLevel.OTHER por defecto. No es que haya detectado una
+    alteracion: es que no pudo mirar. Sin esta distincion el informe acusa de
+    adulterado un documento que no lo esta.
+    """
+    try:
+        emb.reader.stream.seek(0)
+        return b"/Linearized" in emb.reader.stream.read(2048)
+    except Exception:
+        return False
+
+
 def declara_bloqueo(emb):
     """True si esta firma declara un bloqueo de campos (FieldMDP).
 
@@ -113,7 +130,7 @@ def declara_bloqueo(emb):
     return False
 
 
-def resumir(st, es_ultima=True, con_bloqueo=True):
+def resumir(st, es_ultima=True, con_bloqueo=True, linealizado=False):
     """Convierte el estado de pyHanko en algo presentable en texto o en ventana.
 
     `es_ultima` importa para la cobertura: en un documento con varias firmas,
@@ -129,6 +146,11 @@ def resumir(st, es_ultima=True, con_bloqueo=True):
         cobertura_ok = True
         detalle_cobertura = ("abarca todo el documento tal como estaba al firmar "
                              "(despues se agregaron mas firmas)")
+    elif (st.coverage == SignatureCoverageLevel.CONTIGUOUS_BLOCK_FROM_START
+          and not es_ultima and linealizado):
+        cobertura_ok = None
+        detalle_cobertura = ("no se pudo determinar: el PDF esta linealizado y "
+                             "despues se agregaron mas firmas")
     else:
         cobertura_ok = False
         detalle_cobertura = "la firma NO abarca todo el archivo"
@@ -138,7 +160,10 @@ def resumir(st, es_ultima=True, con_bloqueo=True):
         ("Cobertura", cobertura_ok, detalle_cobertura),
         ("Confianza", st.trusted, "el certificado encadena a una raiz confiable"),
     ]
-    if not con_bloqueo:
+    if cobertura_ok is None:
+        # sin cobertura determinada, el veredicto de bloqueo tampoco es confiable
+        filas.append(("Bloqueo", None, "no se pudo evaluar (ver Cobertura)"))
+    elif not con_bloqueo:
         # None = informativo, ni bien ni mal: es una decision de quien firmo
         filas.append(("Bloqueo", None,
                       "sin bloqueo: el documento admite mas firmas"))
@@ -312,7 +337,7 @@ def main():
         resumenes = [
             resumir(validate_pdf_signature(f, signer_validation_context=contexto),
                     es_ultima=(i == len(firmas) - 1),
-                    con_bloqueo=declara_bloqueo(f))
+                    con_bloqueo=declara_bloqueo(f), linealizado=es_linealizado(f))
             for i, f in enumerate(firmas)
         ]
 

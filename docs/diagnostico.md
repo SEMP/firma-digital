@@ -57,6 +57,36 @@ openssl dgst -sha256 -verify pub.pem -signature sig.bin data.bin   # Verified OK
 Si eso da `Verified OK`, el token, el middleware y el PIN están bien: el problema
 está más arriba.
 
+## PDFs linealizados: la cobertura queda indeterminada
+
+En un PDF **linealizado** ("vista web rápida"), el `startxref` final apunta a la
+tabla de referencias del principio del archivo. La comprobación de cobertura de
+pyHanko espera otro valor, así que no logra identificar la revisión firmada; al
+no poder hacerlo **salta el análisis de diferencias** y devuelve
+`ModificationLevel.OTHER` por defecto.
+
+Eso **no significa que el documento esté adulterado**: significa que no se pudo
+analizar. Se nota cuando se agrega una segunda firma a un documento linealizado
+firmado por otra persona — la primera firma pasa de `ENTIRE_FILE` a
+`CONTIGUOUS_BLOCK_FROM_START` / `OTHER` sin que nada se haya roto.
+
+`validar-pdf` detecta el caso (busca `/Linearized` en los primeros 2 KB) y lo
+informa como indeterminado en vez de como falla.
+
+Para verlo a mano:
+
+```bash
+python -c "
+from pyhanko.pdf_utils.reader import PdfFileReader
+r = PdfFileReader(open('doc.pdf','rb')); e = r.embedded_signatures[0]
+br = [int(v) for v in e.sig_object.get_object()['/ByteRange']]
+print(open('doc.pdf','rb').read()[:br[2]+br[3]][-40:])
+print('esperado:', r.xrefs.get_startxref_for_revision(e.signed_revision))"
+```
+
+Si el `startxref` que aparece al final de la zona firmada no coincide con el
+esperado, es este caso.
+
 ## Errores frecuentes
 
 **`Could not find private key with label 'X'`** — las etiquetas de los tres
