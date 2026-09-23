@@ -54,12 +54,37 @@ CONFIG = pathlib.Path(
 ).expanduser() / "firma-digital" / "config.ini"
 
 
-def _config_archivo():
+# Servidor de sellado por defecto: quien clona el repo firma con sello de tiempo
+# sin configurar nada. Gratuito y no acreditado en Paraguay, pero el validador
+# oficial lo acepta sin objeciones (verificado 2026-09-23; ver README). Se puede
+# cambiar por config, por variable de entorno, por flag o desde la ventana.
+SELLO_POR_DEFECTO = "https://freetsa.org/tsr"
+
+
+def _config_archivo(seccion="token"):
     if not CONFIG.is_file():
         return {}
     cp = configparser.ConfigParser()
     cp.read(CONFIG)
-    return dict(cp["token"]) if cp.has_section("token") else {}
+    return dict(cp[seccion]) if cp.has_section(seccion) else {}
+
+
+def resolver_sello(args):
+    """URL del servidor de sellado, o None para no sellar.
+
+    Precedencia: --sin-sello > --sello-de-tiempo > FIRMA_SELLO_DE_TIEMPO >
+    config.ini [firma] > el default del repo. Un valor vacio en cualquiera de
+    los tres ultimos desactiva el sellado.
+    """
+    if args.sin_sello:
+        return None
+    if args.sello_de_tiempo:
+        return args.sello_de_tiempo
+    for origen in (os.environ.get("FIRMA_SELLO_DE_TIEMPO"),
+                   _config_archivo("firma").get("sello_de_tiempo")):
+        if origen is not None:
+            return origen.strip() or None
+    return SELLO_POR_DEFECTO
 
 
 def resolver_token(args):
@@ -203,14 +228,14 @@ def parse_caja(valor):
 
 
 def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
-                bloquear=True):
+                bloquear=True, sello=None):
     """Ventana con la pagina renderizada; devuelve (pagina, caja) o None.
 
     El rectangulo se arrastra con el mouse, igual que en Acrobat. Las
     coordenadas salen en puntos PDF con origen abajo-izquierda, que es lo que
     espera SigFieldSpec.
 
-    Devuelve (pagina, caja, bloquear) o None si se cancela.
+    Devuelve (pagina, caja, bloquear, sello) o None si se cancela.
     """
     import tkinter as tk
     from pyhanko.pdf_utils.reader import PdfFileReader
@@ -221,7 +246,7 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
     lineas = lineas_del_sello(nombre)
     tmp = tempfile.mkdtemp(prefix="firmar-pdf-")
     estado = {"pagina": max(1, min(pagina, total)), "caja": None, "ok": False,
-              "zoom": None}
+              "zoom": None, "bloquear": bloquear, "sello": sello}
 
     root = tk.Tk()
     root.title(f"Elegir area de la firma — {pathlib.Path(pdf).name}")
@@ -250,6 +275,22 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
                            else "queda abierto para que otros firmen"))
     var_bloquear.trace_add("write", actualizar_pista)
     actualizar_pista()
+
+    fila_sello = tk.Frame(root, padx=6, pady=2)
+    fila_sello.pack(fill="x")
+    var_sellar = tk.BooleanVar(value=bool(sello))
+    entrada_sello = tk.Entry(fila_sello, width=42)
+    entrada_sello.insert(0, sello or SELLO_POR_DEFECTO)
+
+    def actualizar_sello(*_):
+        entrada_sello.config(state="normal" if var_sellar.get() else "disabled")
+
+    tk.Checkbutton(fila_sello, text="Sellar la hora con:", variable=var_sellar,
+                   command=actualizar_sello).pack(side="left")
+    entrada_sello.pack(side="left", padx=(2, 0))
+    tk.Label(fila_sello, fg="#777", text="(sin esto, la fecha sale del reloj de "
+             "esta maquina)").pack(side="left", padx=(10, 0))
+    actualizar_sello()
 
     barra = tk.Frame(root)
     barra.pack(fill="x", padx=6, pady=4)
@@ -418,6 +459,12 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
         root.bind_all(ev, scroll_h)
 
     def confirmar():
+        # Hay que leer el Entry ANTES de destruir la ventana: los widgets dejan
+        # de existir y .get() falla con "invalid command name". Las variables
+        # (BooleanVar) si sobreviven, pero conviene guardar todo junto.
+        estado["sello"] = (entrada_sello.get().strip() or None
+                           if var_sellar.get() else None)
+        estado["bloquear"] = var_bloquear.get()
         estado["ok"] = True
         root.destroy()
 
@@ -448,7 +495,8 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
     root.mainloop()
     if not estado["ok"]:
         return None
-    return estado["pagina"], estado["caja"], var_bloquear.get()
+    return (estado["pagina"], estado["caja"],
+            estado["bloquear"], estado["sello"])
 
 
 
@@ -662,11 +710,10 @@ def main():
     p.add_argument("--forzar", action="store_true",
                    help="sobrescribir el archivo de salida si ya existe")
     p.add_argument("--sello-de-tiempo", default=None, metavar="URL",
-                   help="sellar la firma con un servidor RFC 3161. Un sello "
-                        "GRATUITO no es un Sello Cualificado de Tiempo bajo la "
-                        "ICPP: sirve tecnicamente, pero el validador oficial "
-                        "puede no reconocer al sellador. Los prestadores "
-                        "paraguayos ofrecen el cualificado como servicio aparte")
+                   help=f"servidor RFC 3161 a usar (default: {SELLO_POR_DEFECTO})")
+    p.add_argument("--sin-sello", action="store_true",
+                   help="no sellar la hora; la fecha queda a merced del reloj "
+                        "de esta maquina")
     p.add_argument("--pin-terminal", action="store_true",
                    help="pedir el PIN por terminal aunque se use el selector visual")
     p.add_argument("--motivo", default=None)
@@ -710,20 +757,22 @@ def main():
     if os.path.exists(a.salida) and not a.forzar:
         p.error(f"{a.salida} ya existe; usa --forzar o indica otro nombre")
 
+    url_sello = resolver_sello(a)
     uso_selector = not a.invisible and a.caja is None
     if uso_selector:
         elegida = elegir_caja(
             a.entrada, a.pagina,
             leer_nombre_del_token(lib, token_label, cert_label), a.alineacion,
-            bloquear=not a.sin_bloqueo)
+            bloquear=not a.sin_bloqueo, sello=url_sello)
         if elegida is None:
             print("Cancelado, no se firmo nada.", file=sys.stderr)
             return 1
-        pagina, caja, bloquear = elegida
+        pagina, caja, bloquear, url_sello = elegida
         a.caja = (pagina, caja)
         a.sin_bloqueo = not bloquear
         print(f"Area elegida: --caja {pagina}:" + ",".join(map(str, caja))
-              + ("" if bloquear else "  (sin bloqueo)"))
+              + ("" if bloquear else "  (sin bloqueo)")
+              + (f"  (sello: {url_sello})" if url_sello else "  (sin sello)"))
 
     pin = pedir_pin(uso_selector and not a.pin_terminal)
     if pin is None:
@@ -818,8 +867,8 @@ def main():
                 reason=a.motivo, location=a.lugar, **meta_extra,
             )
             sellador = None
-            if a.sello_de_tiempo:
-                sellador = RequestsHTTPTimeStamper(a.sello_de_tiempo, timeout=15)
+            if url_sello:
+                sellador = RequestsHTTPTimeStamper(url_sello, timeout=15)
             pdf_signer = PdfSigner(meta, signer=signer, stamp_style=estilo,
                                    timestamper=sellador)
             with open(a.salida, "wb") as out:
@@ -832,8 +881,8 @@ def main():
 
     detalles = [] if a.sin_bloqueo else ["campos bloqueados"]
     detalles.append("invisible" if a.caja is None else f"sello en pagina {a.caja[0]}")
-    if a.sello_de_tiempo:
-        detalles.append("con sello de tiempo")
+    if url_sello:
+        detalles.append("sellado")
     print(f"Firmado: {a.salida} ({', '.join(detalles)})")
     return 0
 

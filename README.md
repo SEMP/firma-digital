@@ -107,6 +107,9 @@ lib = /usr/lib/bit4id/libbit4xpki.so
 token_label = SecID XXXXXXXXXX
 cert_label = DS3
 key_label = DS3_Private
+
+[firma]
+sello_de_tiempo = https://tsa.de-tu-prestador.com.py   ; vacío = no sellar
 ```
 
 También sirven los flags `--lib`, `--token-label`, `--cert-label`, `--key-label`
@@ -255,8 +258,24 @@ CODE100, Confirma y Documenta lo ofrecen como servicio aparte. Pero como no
 genera advertencias y aporta una prueba de tercero sobre la hora, usar uno
 gratuito no tiene contra técnica.
 
-Queda como opción y no por defecto porque introduce una dependencia de red: sin
-conexión al servidor de sellado, la firma falla.
+**Viene activado por defecto**, con `freetsa.org`, para que quien clone el repo
+firme sellado sin configurar nada. Se cambia o se desactiva por capas, de mayor
+a menor precedencia:
+
+| Origen | Para qué |
+|---|---|
+| `--sin-sello` | desactivar en una corrida |
+| `--sello-de-tiempo URL` | otro servidor, una vez |
+| `FIRMA_SELLO_DE_TIEMPO` | por entorno |
+| `config.ini` → `[firma] sello_de_tiempo` | fijo en esta máquina |
+| constante del repo | el default que hereda quien clona |
+
+Un valor vacío en las tres del medio desactiva el sellado sin tocar el código.
+En el selector visual hay una casilla con la URL editable.
+
+La contra a tener presente: sellar introduce una **dependencia de red** en el
+momento de firmar. Sin conexión al servidor de sellado, la firma falla; ahí sirve
+`--sin-sello`.
 
 ## En Windows
 
