@@ -41,7 +41,7 @@ CARPETAS_CA = [
     pathlib.Path("/usr/share/firma-digital/certificados"),
 ]
 
-OK, MAL = "OK   ", "FALLA"
+OK, MAL, INFO = "OK   ", "FALLA", "--   "
 
 # Validador oficial argentino: acepta certificados paraguayos por el Acuerdo de
 # Reconocimiento Mutuo del Mercosur. Se ofrece este y no el Validador PY del MIC
@@ -97,17 +97,55 @@ def nombre_comun(cert):
         return "(ilegible)"
 
 
-def resumir(st):
-    """Convierte el estado de pyHanko en algo presentable en texto o en ventana."""
-    cubre_todo = st.coverage == SignatureCoverageLevel.ENTIRE_FILE
+def declara_bloqueo(emb):
+    """True si esta firma declara un bloqueo de campos (FieldMDP).
+
+    pyHanko devuelve docmdp_ok=True tambien cuando NO hay bloqueo, asi que sin
+    este chequeo el informe muestra "no hubo cambios prohibidos por el bloqueo"
+    en documentos que quedaron deliberadamente abiertos a mas firmas.
+    """
+    try:
+        for ref in emb.sig_object.get_object().get("/Reference", []):
+            if ref.get_object().get("/TransformMethod") == "/FieldMDP":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def resumir(st, es_ultima=True, con_bloqueo=True):
+    """Convierte el estado de pyHanko en algo presentable en texto o en ventana.
+
+    `es_ultima` importa para la cobertura: en un documento con varias firmas,
+    las que no son la ultima cubren su propia revision (ENTIRE_REVISION) y no el
+    archivo entero, porque despues de ellas se anexaron las firmas siguientes.
+    Eso es lo normal y correcto; exigirles ENTIRE_FILE marcaria como sospechoso
+    un documento multi-firma legitimo.
+    """
+    if st.coverage == SignatureCoverageLevel.ENTIRE_FILE:
+        cobertura_ok = True
+        detalle_cobertura = "la firma abarca todo el archivo"
+    elif st.coverage == SignatureCoverageLevel.ENTIRE_REVISION and not es_ultima:
+        cobertura_ok = True
+        detalle_cobertura = ("abarca todo el documento tal como estaba al firmar "
+                             "(despues se agregaron mas firmas)")
+    else:
+        cobertura_ok = False
+        detalle_cobertura = "la firma NO abarca todo el archivo"
+
     filas = [
         ("Integridad", st.intact, "el documento no fue alterado tras firmar"),
-        ("Cobertura", cubre_todo, "la firma abarca todo el archivo"),
+        ("Cobertura", cobertura_ok, detalle_cobertura),
         ("Confianza", st.trusted, "el certificado encadena a una raiz confiable"),
     ]
-    if st.docmdp_ok is not None:
+    if not con_bloqueo:
+        # None = informativo, ni bien ni mal: es una decision de quien firmo
+        filas.append(("Bloqueo", None,
+                      "sin bloqueo: el documento admite mas firmas"))
+    elif st.docmdp_ok is not None:
         filas.append(("Bloqueo", st.docmdp_ok,
-                      "no hubo cambios prohibidos por el bloqueo"))
+                      "no hubo cambios prohibidos por el bloqueo" if st.docmdp_ok
+                      else "hubo cambios que el bloqueo de esta firma no permite"))
     fecha = None
     if st.signer_reported_dt:
         # la firma guarda la hora en UTC; se muestra en la zona local
@@ -117,7 +155,7 @@ def resumir(st):
         "emisor": st.signing_cert.issuer.native.get("common_name", "?"),
         "fecha": fecha,
         "filas": filas,
-        "ok": all(v for _, v, _ in filas),
+        "ok": all(v is not False for _, v, _ in filas),
     }
 
 
@@ -132,7 +170,8 @@ def render_texto(pdf, resumenes, n_cas):
             print(f"  Fecha      : {r['fecha']}")
         print()
         for etiqueta, valor, detalle in r["filas"]:
-            print(f"  [{OK if valor else MAL}] {etiqueta:<12}  {detalle}")
+            marca = INFO if valor is None else (OK if valor else MAL)
+            print(f"  [{marca}] {etiqueta:<12}  {detalle}")
     todo = all(r["ok"] for r in resumenes)
     print("\n" + ("Todas las firmas son validas y confiables."
                   if todo else "Hay firmas con problemas (ver arriba)."))
@@ -173,8 +212,9 @@ def render_gui(pdf, resumenes, n_cas):
         for etiqueta, valor, detalle in r["filas"]:
             fila = tk.Frame(cuerpo)
             fila.pack(fill="x", pady=1)
-            tk.Label(fila, text="✓" if valor else "✗", width=2,
-                     fg="#1b7f4b" if valor else "#a12",
+            simbolo = "–" if valor is None else ("✓" if valor else "✗")
+            color = "#888" if valor is None else ("#1b7f4b" if valor else "#a12")
+            tk.Label(fila, text=simbolo, width=2, fg=color,
                      font=("TkDefaultFont", 11, "bold")).pack(side="left")
             tk.Label(fila, text=etiqueta, width=11, anchor="w",
                      font=("TkDefaultFont", 10, "bold")).pack(side="left")
@@ -270,8 +310,10 @@ def main():
                 print(aviso)
             return 1
         resumenes = [
-            resumir(validate_pdf_signature(f, signer_validation_context=contexto))
-            for f in firmas
+            resumir(validate_pdf_signature(f, signer_validation_context=contexto),
+                    es_ultima=(i == len(firmas) - 1),
+                    con_bloqueo=declara_bloqueo(f))
+            for i, f in enumerate(firmas)
         ]
 
     if usar_gui:

@@ -63,6 +63,32 @@ Además hay que pasar `docmdp_permissions=MDPPerm.NO_CHANGES` en el
 el spec del campo y emite una advertencia (usa el valor correcto igual, pero el
 mensaje confunde).
 
+### El bloqueo excluye las firmas posteriores
+
+`/Action /All` bloquea **todos** los campos de formulario, y un campo de firma es
+uno de ellos. Verificado agregando una segunda firma a las dos variantes del
+mismo documento:
+
+| Primera firma | `docmdp_ok` de la primera | `modification_level` |
+|---|---|---|
+| con bloqueo | `False` | `OTHER` |
+| sin bloqueo | `True` | `FORM_FILLING` |
+
+En el caso bloqueado pyHanko informa *"Update of Reference(...) is not allowed
+because the form field Firma2 is locked"*.
+
+Consecuencia práctica: en un circuito de varias firmas, sólo el último firmante
+debe bloquear.
+
+**Al validar**, dos cosas que confunden:
+
+- `docmdp_ok` es `True` también cuando **no hay ningún bloqueo**. Para distinguir
+  "el bloqueo se respetó" de "no había bloqueo" hay que mirar si la firma declara
+  un `/Reference` con `/TransformMethod /FieldMDP`.
+- Las firmas que no son la última cubren `ENTIRE_REVISION`, no `ENTIRE_FILE`. Es
+  lo normal en un documento multi-firma; exigirles `ENTIRE_FILE` marca como
+  sospechoso un documento legítimo.
+
 ## El sello visible
 
 Acrobat dibuja el nombre en grande a la izquierda, su logotipo de fondo, y a la

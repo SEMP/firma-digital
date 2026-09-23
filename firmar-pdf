@@ -201,12 +201,15 @@ def parse_caja(valor):
     return pagina, tuple(partes)
 
 
-def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq"):
+def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq",
+                bloquear=True):
     """Ventana con la pagina renderizada; devuelve (pagina, caja) o None.
 
     El rectangulo se arrastra con el mouse, igual que en Acrobat. Las
     coordenadas salen en puntos PDF con origen abajo-izquierda, que es lo que
     espera SigFieldSpec.
+
+    Devuelve (pagina, caja, bloquear) o None si se cancela.
     """
     import tkinter as tk
     from pyhanko.pdf_utils.reader import PdfFileReader
@@ -224,6 +227,28 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq"):
     pant_w = root.winfo_screenwidth()
     pant_h = root.winfo_screenheight()
     max_w, max_h = pant_w - 120, pant_h - 220
+
+    # Acrobat ofrece esto como una casilla "bloquear el documento tras la firma",
+    # que describe el mecanismo y no la consecuencia. Preguntar si alguien mas va
+    # a firmar lleva a la decision correcta sin saber que es un FieldMDP: bloquear
+    # impide las firmas posteriores, y quien firme igual invalida a esta.
+    var_bloquear = tk.BooleanVar(value=bloquear)
+    eleccion = tk.Frame(root, padx=6, pady=2)
+    eleccion.pack(fill="x")
+    tk.Label(eleccion, text="Al terminar:", fg="#555").pack(side="left")
+    tk.Radiobutton(eleccion, text="soy el ultimo en firmar", value=True,
+                   variable=var_bloquear).pack(side="left")
+    tk.Radiobutton(eleccion, text="otros van a firmar despues", value=False,
+                   variable=var_bloquear).pack(side="left")
+    pista = tk.Label(eleccion, fg="#777")
+    pista.pack(side="left", padx=(10, 0))
+
+    def actualizar_pista(*_):
+        pista.config(text=("se bloquea el documento: nadie mas puede firmarlo"
+                           if var_bloquear.get()
+                           else "queda abierto para que otros firmen"))
+    var_bloquear.trace_add("write", actualizar_pista)
+    actualizar_pista()
 
     barra = tk.Frame(root)
     barra.pack(fill="x", padx=6, pady=4)
@@ -420,10 +445,58 @@ def elegir_caja(pdf, pagina=1, nombre=None, alineacion="abajo-izq"):
     root.update_idletasks()
     root.geometry(f"+{max(0, (pant_w - root.winfo_width()) // 2)}+40")
     root.mainloop()
-    return (estado["pagina"], estado["caja"]) if estado["ok"] else None
+    if not estado["ok"]:
+        return None
+    return estado["pagina"], estado["caja"], var_bloquear.get()
 
 
 
+
+
+
+def avisar(mensaje, usar_gui, titulo="Firma digital"):
+    """Muestra un error donde el usuario lo vaya a ver."""
+    if usar_gui:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            raiz = tk.Tk()
+            raiz.withdraw()
+            messagebox.showerror(titulo, mensaje)
+            raiz.destroy()
+            return
+        except Exception:
+            pass
+    print(mensaje, file=sys.stderr)
+
+
+def revisar_token(lib, token_label=None):
+    """Devuelve None si el token esta listo, o un mensaje explicando que falta.
+
+    Se llama ANTES de abrir el selector y de pedir el PIN: sin esto el usuario
+    marca el area, escribe el PIN y recien ahi falla, con un error del modulo
+    PKCS#11 que no dice lo que pasa (el de Bit4id contesta "Module has more than
+    1 slot" cuando en realidad no hay ningun token conectado).
+    """
+    try:
+        import pkcs11
+    except ImportError:
+        return None   # sin la libreria no se puede chequear; que siga el flujo
+    try:
+        etiquetas = [t.label for t in pkcs11.lib(lib).get_tokens()]
+    except Exception as e:
+        return (f"No se pudo consultar el modulo PKCS#11:\n{lib}\n\n"
+                f"{type(e).__name__}: {e}")
+    if not etiquetas:
+        return ("No se detecto ningun token conectado.\n\n"
+                "Conecta el dispositivo de firma y volve a intentar.\n"
+                "Si ya esta conectado, revisa que el lector responda con:\n"
+                "    pcsc_scan")
+    if token_label and token_label not in etiquetas:
+        disponibles = ", ".join(etiquetas)
+        return (f"No se encontro el token '{token_label}'.\n\n"
+                f"Conectados: {disponibles}")
+    return None
 
 
 def leer_nombre_del_token(lib, token_label=None, cert_label=None):
@@ -575,7 +648,9 @@ def main():
                    help="pagina en la que abre el selector (default: 1)")
     p.add_argument("--campo", default="Firma1", help="nombre del campo de firma")
     p.add_argument("--sin-bloqueo", action="store_true",
-                   help="no bloquear los campos tras firmar")
+                   help="no bloquear el documento: permite que otros firmen "
+                        "despues sin invalidar esta firma. En el selector visual "
+                        "esto se elige en la ventana")
     p.add_argument("--tamano-fuente", type=int, default=None,
                    help="cuerpo del texto del sello; por defecto se calcula "
                         "el mayor que entre en la caja elegida")
@@ -601,6 +676,17 @@ def main():
         p.error("--invisible y --caja son excluyentes")
 
     hay_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    # todo el flujo grafico arranca si no se dio el archivo por linea de comandos
+    usar_gui = bool(hay_display) and a.entrada is None
+
+    # El token se revisa ANTES de pedir archivos, area y PIN: no tiene sentido
+    # hacer todo el recorrido para fallar al final por un dispositivo ausente.
+    lib, token_label, cert_label, key_label = resolver_token(a)
+    problema = revisar_token(lib, token_label)
+    if problema:
+        avisar(problema, usar_gui)
+        return 1
+
     if a.entrada is None:
         if not hay_display:
             p.error("sin entorno grafico hay que indicar el PDF a firmar")
@@ -617,25 +703,47 @@ def main():
     if os.path.exists(a.salida) and not a.forzar:
         p.error(f"{a.salida} ya existe; usa --forzar o indica otro nombre")
 
-    lib, token_label, cert_label, key_label = resolver_token(a)
-
     uso_selector = not a.invisible and a.caja is None
     if uso_selector:
         elegida = elegir_caja(
             a.entrada, a.pagina,
-            leer_nombre_del_token(lib, token_label, cert_label), a.alineacion)
+            leer_nombre_del_token(lib, token_label, cert_label), a.alineacion,
+            bloquear=not a.sin_bloqueo)
         if elegida is None:
             print("Cancelado, no se firmo nada.", file=sys.stderr)
             return 1
-        a.caja = elegida
-        print(f"Area elegida: --caja {a.caja[0]}:" + ",".join(map(str, a.caja[1])))
+        pagina, caja, bloquear = elegida
+        a.caja = (pagina, caja)
+        a.sin_bloqueo = not bloquear
+        print(f"Area elegida: --caja {pagina}:" + ",".join(map(str, caja))
+              + ("" if bloquear else "  (sin bloqueo)"))
 
     pin = pedir_pin(uso_selector and not a.pin_terminal)
     if pin is None:
         print("Cancelado, no se firmo nada.", file=sys.stderr)
         return 1
     criterio = TokenCriteria(label=token_label) if token_label else None
-    session = open_pkcs11_session(lib, token_criteria=criterio, user_pin=pin)
+    try:
+        session = open_pkcs11_session(lib, token_criteria=criterio, user_pin=pin)
+    except Exception as e:
+        texto = str(e)
+        if "PIN_INCORRECT" in texto or "PIN_INVALID" in texto:
+            # Un PIN equivocado cuenta como intento fallido contra el token, que
+            # se bloquea a los 3. Conviene decirlo antes de que reintente.
+            mensaje = ("PIN incorrecto.\n\n"
+                       "ATENCION: cada intento fallido acerca el token al bloqueo "
+                       "(se bloquea a los 3 y hace falta el PUK).\n"
+                       "Verifica el PIN antes de reintentar. Para ver cuantos "
+                       "intentos quedan, sin gastar ninguno:\n"
+                       f"    pkcs11-tool --module {lib} -T | grep flags")
+        elif "PIN_LOCKED" in texto:
+            mensaje = ("El token esta BLOQUEADO por intentos fallidos.\n\n"
+                       "Hace falta el PUK: contacta a la entidad certificadora.")
+        else:
+            mensaje = (f"No se pudo abrir la sesion con el token.\n\n{texto}\n\n"
+                       "Si lo desconectaste, volve a conectarlo e intenta de nuevo.")
+        avisar(mensaje, usar_gui)
+        return 1
     try:
         # cert_label/key_label en None => pyHanko consulta solo por clase y toma
         # el unico objeto que haya (ver docs/diagnostico.md)

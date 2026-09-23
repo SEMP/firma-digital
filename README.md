@@ -117,6 +117,33 @@ o las variables `FIRMA_LIB`, `FIRMA_TOKEN_LABEL`, `FIRMA_CERT_LABEL`,
 pkcs11-tool --module /ruta/al/modulo.so -O -l
 ```
 
+## Documentos que firman varias personas
+
+**El bloqueo impide las firmas posteriores.** La casilla *"bloquear el documento
+tras la firma"* de Acrobat —y la opción equivalente acá— escribe un `/FieldMDP`
+con `/Action /All`, que bloquea **todos los campos de formulario**. Un campo de
+firma es un campo de formulario: si alguien firma después, **tu firma queda
+marcada como violada**.
+
+Medido: al agregar una segunda firma a un documento bloqueado, la primera pasa a
+`docmdp_ok=False` (modificación clasificada como `OTHER`), y pyHanko lo dice
+textual — *"the form field Firma2 is locked"*. Sin bloqueo, la misma operación se
+clasifica como `FORM_FILLING` y la primera firma queda intacta.
+
+**La regla:** en un documento con varios firmantes, sólo **el último** bloquea.
+Los demás firman sin bloqueo.
+
+En la ventana esto se elige arriba de todo:
+
+```
+Al terminar:  (•) soy el último en firmar   ( ) otros van a firmar después
+              se bloquea el documento: nadie más puede firmarlo
+```
+
+Está planteado como *"¿sos el último?"* y no como *"¿bloquear?"* a propósito: la
+pregunta por la situación lleva a la respuesta correcta sin tener que saber qué
+es un FieldMDP. Desde la terminal, `--sin-bloqueo`.
+
 ## Validar un PDF firmado
 
 ```bash
