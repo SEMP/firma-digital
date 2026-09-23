@@ -155,11 +155,39 @@ def resumir(st, es_ultima=True, con_bloqueo=True, linealizado=False):
         cobertura_ok = False
         detalle_cobertura = "la firma NO abarca todo el archivo"
 
+    # Sello de tiempo: prueba de un tercero de que la firma existia en ese
+    # momento. Sin el, la fecha sale del reloj de la maquina que firmo.
+    sello = None
+    tv = getattr(st, "timestamp_validity", None)
+    if tv is not None:
+        emisor = "?"
+        try:
+            emisor = tv.signing_cert.subject.native.get("common_name", "?")
+        except Exception:
+            pass
+        confiable = tv.trust_problem_indic is None
+        sello = {
+            "fecha": f"{tv.timestamp.astimezone():%Y-%m-%d %H:%M:%S %z}",
+            "emisor": emisor,
+            "confiable": confiable,
+        }
+
     filas = [
         ("Integridad", st.intact, "el documento no fue alterado tras firmar"),
         ("Cobertura", cobertura_ok, detalle_cobertura),
         ("Confianza", st.trusted, "el certificado encadena a una raiz confiable"),
     ]
+    if sello is None:
+        filas.append(("Sello tiempo", None,
+                      "sin sello: la fecha sale del reloj de quien firmo"))
+    elif sello["confiable"]:
+        filas.append(("Sello tiempo", True,
+                      f"sellado el {sello['fecha']} por {sello['emisor']}"))
+    else:
+        filas.append(("Sello tiempo", None,
+                      f"sellado el {sello['fecha']} por {sello['emisor']}, "
+                      "pero ese sellador no encadena a una raiz confiable"))
+
     if cobertura_ok is None:
         # sin cobertura determinada, el veredicto de bloqueo tampoco es confiable
         filas.append(("Bloqueo", None, "no se pudo evaluar (ver Cobertura)"))
@@ -179,6 +207,7 @@ def resumir(st, es_ultima=True, con_bloqueo=True, linealizado=False):
         "firmante": nombre_comun(st.signing_cert),
         "emisor": st.signing_cert.issuer.native.get("common_name", "?"),
         "fecha": fecha,
+        "sello": sello,
         "filas": filas,
         "ok": all(v is not False for _, v, _ in filas),
     }

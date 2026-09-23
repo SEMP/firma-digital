@@ -232,11 +232,31 @@ la firma marcada como **Válida**.
 No se pudo probar contra el *Validador PY* del MIC porque la página desde la que
 se accede devuelve 404 (ver más abajo). Si lo probás, avisá cómo te fue.
 
-**Sin sello de tiempo:** la fecha de la firma sale del **reloj de la máquina que
-firma**, y el validador oficial lo señala. Si el reloj está mal, la firma queda
-fechada mal y nada lo corrige después. Los prestadores ofrecen sello cualificado
-de tiempo como servicio aparte; esta herramienta no lo usa, igual que Acrobat en
-la configuración que veníamos usando.
+## Sello de tiempo
+
+Sin sello, la fecha de la firma sale del **reloj de la máquina que firma**, y el
+validador oficial lo señala en amarillo. Si el reloj está mal, la firma queda
+fechada mal y nada lo corrige después.
+
+`--sello-de-tiempo URL` agrega un sello RFC 3161:
+
+```bash
+firmar-pdf doc.pdf firmado.pdf --sello-de-tiempo https://freetsa.org/tsr
+```
+
+**Verificado el 2026-09-23:** un sello de **freetsa.org** (gratuito, no
+acreditado en Paraguay) es aceptado por el validador oficial argentino sin
+objeciones — el documento sigue *Válido*, la sección del sello pasa a verde con
+el emisor identificado y las cinco comprobaciones en verde.
+
+La salvedad: eso **no lo convierte en un *Sello Cualificado de Tiempo*** en el
+sentido legal. Para eso hay que contratarlo a un prestador acreditado — SOS,
+CODE100, Confirma y Documenta lo ofrecen como servicio aparte. Pero como no
+genera advertencias y aporta una prueba de tercero sobre la hora, usar uno
+gratuito no tiene contra técnica.
+
+Queda como opción y no por defecto porque introduce una dependencia de red: sin
+conexión al servidor de sellado, la firma falla.
 
 ## En Windows
 
