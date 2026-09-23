@@ -133,6 +133,12 @@ clasifica como `FORM_FILLING` y la primera firma queda intacta.
 **La regla:** en un documento con varios firmantes, sólo **el último** bloquea.
 Los demás firman sin bloqueo.
 
+**Verificado el 2026-09-23** con dos tokens reales de prestadores distintos
+(CODE100 y SOS) sobre un documento de 3 páginas: el validador oficial argentino
+da *"Documento Válido — No hubo problemas en las firmas"* y ambas firmas como
+**Válida**, cada una con integridad, cadena contra AC licenciada, vigencia y
+revocación en verde.
+
 En la ventana esto se elige arriba de todo:
 
 ```
@@ -225,6 +231,12 @@ la firma marcada como **Válida**.
 
 No se pudo probar contra el *Validador PY* del MIC porque la página desde la que
 se accede devuelve 404 (ver más abajo). Si lo probás, avisá cómo te fue.
+
+**Sin sello de tiempo:** la fecha de la firma sale del **reloj de la máquina que
+firma**, y el validador oficial lo señala. Si el reloj está mal, la firma queda
+fechada mal y nada lo corrige después. Los prestadores ofrecen sello cualificado
+de tiempo como servicio aparte; esta herramienta no lo usa, igual que Acrobat en
+la configuración que veníamos usando.
 
 ## En Windows
 

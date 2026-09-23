@@ -73,6 +73,10 @@ firmado por otra persona — la primera firma pasa de `ENTIRE_FILE` a
 `validar-pdf` detecta el caso (busca `/Linearized` en los primeros 2 KB) y lo
 informa como indeterminado en vez de como falla.
 
+**Confirmado que es cosmético:** el mismo documento de dos firmas que pyHanko no
+puede clasificar pasa el validador oficial argentino con ambas firmas válidas
+(2026-09-23). La limitación está en el análisis, no en el documento.
+
 Para verlo a mano:
 
 ```bash
